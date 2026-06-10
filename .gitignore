@@ -2,3 +2,10 @@
 # Smieci
 client-isolation-bypass - Copy/
 kali-linux-2026.1-vmware-amd64/
+
+# Bartek — pliki lokalne (nie dla repo)
+bartek-mac-flood/AirSnitch-wyjasnienie.pdf
+bartek-mac-flood/plan-realizacji-projektu.pdf
+bartek-mac-flood/Plan-prezentacji.md
+bartek-mac-flood/captures/*.pcap
+bartek-mac-flood/logs/*.log
