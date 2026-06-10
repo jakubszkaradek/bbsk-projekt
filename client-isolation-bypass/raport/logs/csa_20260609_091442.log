@@ -1,0 +1,35 @@
+*** Creating nodes
+Warning! If you already had Mininet-WiFi installed please run util/install.sh -W and then sudo make install.
+Error: Please run sudo mn -c.
+*** Error: Cannot find device "sta1-wlan0"
+*** Error: Cannot find device "sta1-wlan0"
+*** Error: Cannot find device "sta1-wlan0"
+*** Starting controller(s)
+*** Starting L2 nodes
+ap1 ...
+
+*** Waiting for association...
+=== Pre-Test Channel & Association ===
+  sta1 channel: unknown
+  Associated: True
+=== Test: Sending Spoofed CSA Action Frame ===
+       Attempting to force station to switch from channel 6 to channel 1
+> > > > > > > > > > > > > > > > > > 
+=== Post-Attack Channel & Association ===
+  sta1 channel: unknown
+  Associated: True
+[PASS] Station did NOT change channel.
+       CSA Action Frame was rejected. PMF likely protects it.
+*** Stopping 0 controllers
+
+*** Stopping 2 links
+..
+*** Stopping switches/access points
+ap1 
+*** Stopping nodes
+sta1 
+
+*** Removing WiFi module and Configurations
+*** Killing mac80211_hwsim
+
+*** Done

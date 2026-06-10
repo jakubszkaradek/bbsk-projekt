@@ -1,0 +1,10 @@
+# Wymus LF dla wszystkich plikow tekstowych
+# (skrypty shell i Python MUSZA miec LF na Linux)
+* text=auto eol=lf
+
+# Pliki binarne
+*.pcap binary
+*.pdf binary
+*.png binary
+*.jpg binary
+*.pem binary

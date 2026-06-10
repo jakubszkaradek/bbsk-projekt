@@ -1,0 +1,36 @@
+# SSH / secrets — nigdy w repo
+agent_key.pem
+**/agent_key.pem
+*.pem
+id_ed25519
+id_ed25519.pub
+
+# Raport — duże PCAP opcjonalnie
+# raport/pcaps/**/*.pcap
+
+# AI Agent files — nie potrzebne w repo
+AGENT.md
+AGENTS.md
+BRAIN.md
+CODE-RECON.md
+TOOLS.md
+EXECUTION-MOMENTUM.md
+MASTER_PROMPT.md
+HANDOFF.md
+.cursor/
+.mcp.json
+cursor_chat_*.json
+
+# IDE / environment
+venv/
+__pycache__/
+*.pyc
+.venv/
+
+# VM images — nigdy w repo
+kali-linux-2026.1-vmware-amd64/
+**/kali-linux-2026.1-vmware-amd64/
+
+# Nested repo � nie trackowac
+deep-research-web-ui/
+deep-research-web-ui/.git
