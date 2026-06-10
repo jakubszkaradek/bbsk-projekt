@@ -24,7 +24,7 @@ echo "  ok"
 echo ""
 
 # --- krok 2: modul wirtualnych kart wifi ---
-echo "  [2/3] ladowanie mac80211_hwsim (4 wirtualne karty wifi)..."
+echo "  [2/3] ladowanie wirtualnych kart wifi"
 modprobe mac80211_hwsim radios=4
 echo "  ok"
 echo ""
@@ -32,12 +32,9 @@ echo ""
 # --- krok 3: start topologii ---
 echo "  [3/3] uruchamianie topologii..."
 echo ""
-echo "  po uruchomieniu bedziez w CLI mininet-wifi"
-echo "  jedyna komenda ktora musisz wpisac:"
+echo "  po uruchomieniu w CLI mininet-wifi nalezy wpisac:"
 echo ""
-echo "      mininet-wifi> sta2 python3 /home/kali/bbsk-projekt/demo.py"
-echo ""
-echo "  (OVS bridge jest naprawiany automatycznie przez topology.py)"
+echo "      sta2 python3 /home/kali/bbsk-projekt/demo.py"
 echo ""
 echo "============================================================"
 echo ""
