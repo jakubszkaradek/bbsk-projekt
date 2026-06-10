@@ -49,6 +49,6 @@ ssh kali-lab "sudo python3 /mnt/hgfs/kuba-pmf-bypass/raport/direct_hwsim_csa.py 
 ## Demo (na VM, bez SSH)
 
 ```bash
-cd /mnt/hgfs/kuba-pmf-bypass/demo
-sudo ./demo_atak_csa.sh
+cd /mnt/hgfs/demo
+sudo python3 demo_atak_csa.py
 ```

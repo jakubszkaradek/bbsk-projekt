@@ -20,6 +20,16 @@ SHARE="/mnt/hgfs"
 RAPORT="$SHARE/raport"
 REPO="$HOME/pmf-bypass-lab-infra"
 SHARE_REPO="$SHARE/pmf-bypass-lab-infra"
+HOSTAPD_210_BACKUP="/usr/sbin/hostapd-2.10.bak"
+
+ensure_hostapd_210() {
+    local current
+    current="$(hostapd -v 2>&1 | head -1 || true)"
+    if echo "$current" | grep -q "v2\.6" && [ -f "$HOSTAPD_210_BACKUP" ]; then
+        sudo cp "$HOSTAPD_210_BACKUP" /usr/sbin/hostapd
+        sudo chmod +x /usr/sbin/hostapd
+    fi
+}
 
 cmd_clean() {
     echo "=== Cleaning Mininet-WiFi state ==="
@@ -39,6 +49,7 @@ cmd_sync() {
 }
 
 cmd_status() {
+    ensure_hostapd_210
     echo "=== Lab Status ==="
     echo -n "hwsim radios: "; iw dev 2>/dev/null | grep -c Interface || echo "0"
     echo -n "OVS: "; sudo systemctl is-active openvswitch-switch 2>/dev/null || echo "inactive"

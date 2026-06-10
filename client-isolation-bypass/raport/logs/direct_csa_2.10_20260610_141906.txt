@@ -1,0 +1,11 @@
+Test: Direct hwsim CSA Injection
+hostapd: 2.10
+PMF: 2
+Legit channel: 6
+Evil channel: 11
+Beacon count: 30
+Result: BLOCKED
+Pre channel: 6 → Post channel: 6
+Associated after: True
+Evil Twin: SKIPPED
+PCAP: /mnt/hgfs/raport/pcaps/csa_injection/evil_twin_2.10_20260610_141842.pcap
