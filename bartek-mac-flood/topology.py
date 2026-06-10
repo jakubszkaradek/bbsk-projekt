@@ -64,16 +64,17 @@ def topology():
     ap1.start([c0])
 
     import time
+    import subprocess as _sp
     time.sleep(3)
 
     info("*** Konfiguracja OVS bridge\n")
-    # Znajdź rzeczywisty interfejs wlan AP (ap1-wlan1)
     ap_wlan = ap1.params['wlan'][0]   # np. 'ap1-wlan1'
 
-    # Wyczyść błędne porty z OVS i dodaj właściwy wlan
-    ap1.cmd('ovs-vsctl del-port ap1 ap1-wlan2 2>/dev/null')
-    ap1.cmd('ovs-vsctl del-port ap1 h1-eth0 2>/dev/null')
-    ap1.cmd(f'ovs-vsctl add-port ap1 {ap_wlan} 2>/dev/null')
+    # fix OVS - usun bledne porty i dodaj wlasciwy wlan interfejs
+    # musi byc przez subprocess (root namespace), nie przez ap1.cmd()
+    _sp.run('ovs-vsctl del-port ap1 ap1-wlan2 2>/dev/null', shell=True)
+    _sp.run('ovs-vsctl del-port ap1 h1-eth0   2>/dev/null', shell=True)
+    _sp.run(f'ovs-vsctl add-port ap1 {ap_wlan} 2>/dev/null', shell=True)
 
     info("*** Konfiguracja IP\n")
     h1.cmd('ip addr flush dev h1-eth0')

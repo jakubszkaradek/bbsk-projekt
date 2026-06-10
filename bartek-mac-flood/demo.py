@@ -292,7 +292,7 @@ print()
 
 if "Connected" in assoc.stdout:
     linie = [l.strip() for l in assoc.stdout.split('\n')
-             if any(k in l for k in ('Connected', 'SSID', 'freq', 'signal'))]
+             if any(k in l for k in ('Connected', 'SSID'))]
     for l in linie[:4]:
         print(f"  {l}")
     print()
