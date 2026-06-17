@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Test: verify station can see AP and try association."""
+"""test: sprawdza czy stacja widzi ap i moze probowac asocjacji"""
 from mn_wifi.net import Mininet_wifi
 from mininet.log import setLogLevel, info
 import time

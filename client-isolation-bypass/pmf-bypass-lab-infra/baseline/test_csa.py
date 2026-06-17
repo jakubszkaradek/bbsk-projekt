@@ -1,13 +1,8 @@
 #!/usr/bin/env python3
 """
-CSA Test v3 — working MAC extraction + scapy detection.
-
-Key fixes:
-  - MAC from 'ip link' (wintfs.mac = None in this Mininet-WiFi version)
-  - Scapy detection: look for '>' chars (scapy verbose output)
-  - Test: IP stability + interface state after CSA injection
-
-Usage: sudo python3 test_csa.py
+test csa v3 - poprawione wyciaganie mac + detekcja scapy
+mac z ip link (wintfs.mac = None w tej wersji Mininet-WiFi)
+detekcja scapy: szukamy znakow '>' (verbose output scapy)
 """
 
 import os, sys, time, re
@@ -21,14 +16,14 @@ IFACE = "wlan0"
 
 
 def get_sta_mac(sta):
-    """Extract MAC from ip link inside namespace."""
+    """wyciaga mac z ip link wewnatrz namespace"""
     r = sta.cmd("ip -c=never link show wlan0")
     m = re.search(r'link/ether ([0-9a-f:]+)', r)
     return m.group(1) if m else "00:00:00:00:00:01"
 
 
 def iface_is_up(sta):
-    """Check if wlan0 is UP."""
+    """sprawdza czy wlan0 jest UP"""
     r = sta.cmd("ip -c=never link show wlan0")
     return "state UP" in r
 
@@ -49,14 +44,14 @@ def run_test():
     info("\n*** Waiting 15s for DHCP...\n")
     time.sleep(15)
 
-    # ---- Pre-test ----
+    # przed testem
     info("=== Pre-Test ===\n")
     ip_before = sta1.IP()
     up_before = iface_is_up(sta1)
     sta_mac = get_sta_mac(sta1)
     info(f"  IP: {ip_before}  MAC: {sta_mac}  IFACE_UP: {up_before}\n")
 
-    # ---- CSA Injection ----
+    # csa injection
     info("=== Sending Spoofed CSA Frames ===\n")
 
     scapy_cmd = (
@@ -69,18 +64,18 @@ def run_test():
     )
 
     result = sta1.cmd(scapy_cmd)
-    sent_count = result.count('>')  # Each '>' = one sent frame confirmation from scapy
+    sent_count = result.count('>')  # kazdy '>' = potwierdzenie wyslania ramki z scapy
     info(f"  Frames sent: {sent_count}/30\n")
 
     time.sleep(5)
 
-    # ---- Post-test ----
+    # po tescie
     info("=== Post-Test ===\n")
     ip_after = sta1.IP()
     up_after = iface_is_up(sta1)
     info(f"  IP: {ip_after}  IFACE_UP: {up_after}\n")
 
-    # ---- Analysis ----
+    # analiza
     ip_stable = ip_before and ip_before == ip_after
 
     info(f"  IP stable: {ip_stable}\n")
@@ -91,7 +86,7 @@ def run_test():
         test_passed = True
     elif not ip_stable and sent_count > 0:
         info(f"\n[ALERT] Station IP changed after {sent_count} frames!\n")
-        info("       → VULNERABLE hostapd version (CSA = Non-Robust).\n")
+        info("       VULNERABLE hostapd version (CSA = Non-Robust).\n")
         test_passed = False
     else:
         info("\n[PASS] CSA frames blocked (no frames sent or no effect).\n")

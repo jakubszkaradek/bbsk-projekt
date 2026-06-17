@@ -1,19 +1,9 @@
 #!/usr/bin/env python3
 """
-WIDS Evasion Test — Beacon CSA Injection
-==========================================
-Runs the full PMF bypass exploit while monitoring with scapy_sniffer.
-Verifies which (if any) WIDS alerts are triggered by Beacon CSA injection.
-
-Attack: Beacon CSA (subtype 8) with IE 37 — station switches channel.
-WIDS:  scapy_sniffer captures all management frames on injection interface.
-       Kismet runs passively with alert logging.
-
-Expected result: Beacon CSA should NOT trigger Deauth/Disassoc alerts.
-Beacon frames (subtype 8) are normal traffic — WIDS should be blind to CSA.
-
-Usage:
-    sudo python3 raport/wids_evasion_test.py
+test omijania wids - beacon csa injection
+uruchamia pelny exploit pmf bypass z jednoczesnym monitorowaniem przez scapy_sniffer
+sprawdza ktore alerty wids sa wywolywane przez beacon csa
+beacony subtype 8 to normalny ruch - wids powinien byc slepy na csa
 """
 
 import argparse
@@ -36,7 +26,7 @@ MGMT_SUBTYPES = {
     10: "Disassoc", 11: "Auth", 12: "Deauth", 13: "Action",
 }
 
-# Alert-worthy: frames that PMF should protect
+# ramki ktore pmf powinien chronic
 ALERT_SUBTYPES = {10: "Disassoc", 12: "Deauth", 13: "Action"}
 
 
@@ -52,9 +42,9 @@ def sudo(cmd):
     return subprocess.run(f"sudo {cmd}", shell=True, capture_output=True, text=True, timeout=30)
 
 
-# ─── WIDS: scapy_sniffer wrapper ────────────────────────────────────────────
+# wids: wrapper scapy_sniffer
 def start_sniffer(iface, pcap_out, duration=90):
-    """Start scapy_sniffer in background, returns process."""
+    """uruchamia scapy_sniffer w tle, zwraca proces"""
     log(f"[WIDS] Starting scapy_sniffer on {iface} ({duration}s)")
     proc = subprocess.Popen(
         ["sudo", "python3", str(RAPORT_DIR.parent / "pmf-bypass-lab-infra" / "wids" / "scapy_sniffer.py"),
@@ -66,12 +56,12 @@ def start_sniffer(iface, pcap_out, duration=90):
 
 
 def parse_sniffer_output(stdout_lines):
-    """Parse scapy_sniffer output, count frame types, detect anomalies."""
+    """parsuje output scapy_sniffer, zlicza typy ramek, wykrywa anomalie"""
     counts = Counter()
     alerts = []
     
     for line in stdout_lines:
-        # Count frames: "[timestamp] Beacon    DA=... SA=... BSSID=... [!]"
+        # zliczanie ramek: "[timestamp] Beacon    DA=... SA=... BSSID=... [!]"
         for subtype, name in MGMT_SUBTYPES.items():
             if name in line:
                 counts[name] += 1
@@ -81,15 +71,15 @@ def parse_sniffer_output(stdout_lines):
     return counts, alerts
 
 
-# ─── Kismet wrapper ─────────────────────────────────────────────────────────
+# wrapper kismet
 def start_kismet(iface):
-    """Start Kismet in passive mode, logging alerts."""
+    """uruchamia kismet w trybie pasywnym, loguje alerty"""
     log("[WIDS] Starting Kismet...")
     kismet_dir = "/tmp/kismet_wids"
     subprocess.run(["sudo", "mkdir", "-p", kismet_dir], capture_output=True)
     subprocess.run(["sudo", "rm", "-f", f"{kismet_dir}/*"], capture_output=True)
     
-    # Kismet 2025 uses different CLI than older versions
+    # kismet 2025 ma inne cli niz starsze wersje
     proc = subprocess.Popen(
         ["sudo", "kismet", "--no-server", "--daemonize",
          "-c", iface, "--log-dir", kismet_dir],
@@ -97,7 +87,7 @@ def start_kismet(iface):
     )
     time.sleep(5)
     
-    # Check if running
+    # sprawdz czy dziala
     r = subprocess.run(["pgrep", "kismet"], capture_output=True, text=True)
     if r.stdout.strip():
         log(f"  Kismet running (PID={r.stdout.strip()})")
@@ -108,7 +98,7 @@ def start_kismet(iface):
 
 
 def check_kismet_alerts(kismet_dir):
-    """Check Kismet log for alerts (DEAUTHFLOOD, CHANCHANGE, APSPOOF)."""
+    """sprawdza log kismet pod katem alertow (DEAUTHFLOOD, CHANCHANGE, APSPOOF)"""
     alerts = []
     alert_file = Path(kismet_dir) / "kismet_alert.log"
     if alert_file.exists():
@@ -119,7 +109,7 @@ def check_kismet_alerts(kismet_dir):
     return alerts
 
 
-# ─── Main ───────────────────────────────────────────────────────────────────
+# glowna
 def main():
     parser = argparse.ArgumentParser(description="WIDS Evasion Test")
     parser.add_argument("--hostapd-ver", default="2.6", choices=["2.6", "2.10"])
@@ -130,19 +120,19 @@ def main():
     sniffer_pcap = str(PCAP_DIR / f"wids_sniffer_{args.hostapd_ver}_{ts}.pcap")
     
     log("=" * 55)
-    log("  WIDS EVASION TEST — Beacon CSA Injection")
+    log("  WIDS EVASION TEST - Beacon CSA Injection")
     log(f"  hostapd: {args.hostapd_ver}  PMF: 2")
     log(f"  WIDS: scapy_sniffer + Kismet")
     log("=" * 55)
     
-    # Cleanup
+    # czyszczenie
     for p in ["hostapd", "wpa_supplicant", "kismet"]:
         subprocess.run(["sudo", "pkill", "-f", p], capture_output=True)
     time.sleep(1)
     subprocess.run(["sudo", "modprobe", "-r", "mac80211_hwsim"], capture_output=True)
     
     try:
-        # Load hwsim
+        # laduj hwsim
         subprocess.run(["sudo", "modprobe", "mac80211_hwsim", "radios=4"], capture_output=True)
         time.sleep(2)
         
@@ -152,17 +142,17 @@ def main():
             log(f"ERROR: Need 4 interfaces, got {len(ifaces)}")
             return 1
         
-        inj_iface = ifaces[2]  # Will be set to monitor mode by the exploit
+        inj_iface = ifaces[2]  # bedzie w trybie monitor ustawionym przez exploit
         log(f"  Injection/monitor iface: {inj_iface}")
         
-        # Start WIDS monitoring
+        # start monitorowania wids
         sniffer_proc = start_sniffer(inj_iface, sniffer_pcap, duration=90)
         
         kismet_dir = "/tmp/kismet_wids"
         if not args.no_kismet:
             kismet_proc, kismet_dir = start_kismet(inj_iface)
         
-        # Run the full exploit
+        # uruchom pelny exploit
         log("[ATTACK] Running full exploit...")
         exploit_cmd = (
             f"sudo python3 {RAPORT_DIR}/direct_hwsim_csa.py "
@@ -172,13 +162,13 @@ def main():
         r = subprocess.run(exploit_cmd, shell=True, capture_output=True, text=True, timeout=120)
         exploit_output = r.stdout
         
-        # Check exploit result
+        # sprawdz wynik exploita
         if "SUCCESS" in exploit_output:
-            log("[ATTACK] Exploit SUCCESS — CSA bypassed PMF")
+            log("[ATTACK] Exploit SUCCESS - CSA bypassed PMF")
         else:
             log(f"[ATTACK] Exploit result: check log")
         
-        # Wait for sniffer to finish
+        # czekaj na zakonczenie sniffera
         log("[WIDS] Waiting for sniffer to complete...")
         try:
             sniffer_stdout, _ = sniffer_proc.communicate(timeout=60)
@@ -186,17 +176,17 @@ def main():
             sniffer_proc.kill()
             sniffer_stdout, _ = sniffer_proc.communicate()
         
-        # Parse sniffer results
+        # parsuj wyniki sniffera
         sniffer_lines = sniffer_stdout.split("\n") if sniffer_stdout else []
         frame_counts, sniffer_alerts = parse_sniffer_output(sniffer_lines)
         
-        # Check Kismet
+        # sprawdz kismet
         kismet_alerts = []
         if not args.no_kismet:
             kismet_alerts = check_kismet_alerts(kismet_dir)
             subprocess.run(["sudo", "pkill", "kismet"], capture_output=True)
         
-        # ─── Report ─────────────────────────────────────────────────────────
+        # raport
         print()
         print("=" * 55)
         print("  WIDS EVASION RESULTS")
@@ -204,7 +194,7 @@ def main():
         print()
         print("--- Frame Counts (scapy_sniffer) ---")
         for name, count in sorted(frame_counts.items(), key=lambda x: x[1], reverse=True):
-            alert = " ← ALERT-WORTHY" if name in ALERT_SUBTYPES.values() else ""
+            alert = " <-- ALERT-WORTHY" if name in ALERT_SUBTYPES.values() else ""
             print(f"  {name:15s}: {count:4d}{alert}")
         
         print()
@@ -214,7 +204,7 @@ def main():
                 print(f"  {a}")
             print(f"  Total: {len(sniffer_alerts)} alert-worthy frames detected")
         else:
-            print("  NONE — Beacon CSA does NOT trigger Deauth/Disassoc alerts!")
+            print("  NONE - Beacon CSA does NOT trigger Deauth/Disassoc alerts!")
         
         print()
         print("--- Kismet Alerts ---")
@@ -222,7 +212,7 @@ def main():
             for a in kismet_alerts:
                 print(f"  {a}")
         else:
-            print("  NONE — Kismet did not detect Beacon CSA injection!")
+            print("  NONE - Kismet did not detect Beacon CSA injection!")
         
         print()
         print("--- Verdict ---")
@@ -232,17 +222,17 @@ def main():
         action_count = frame_counts.get("Action", 0)
         
         if deauth_count == 0 and disassoc_count == 0:
-            print("  ✅ Beacon CSA injection EVADES standard WIDS detection.")
+            print("  [OK] Beacon CSA injection EVADES standard WIDS detection.")
             print("  Beacon frames (subtype 8) are normal traffic.")
             print("  Only CSA IE (tag 37) inspection would reveal the attack.")
         else:
-            print(f"  ⚠️  Detected: Deauth={deauth_count} Disassoc={disassoc_count}")
+            print(f"  [WARN] Detected: Deauth={deauth_count} Disassoc={disassoc_count}")
         
         print(f"  Sniffer PCAP: {sniffer_pcap}")
         print(f"  Beacon frames captured: {beacon_count}")
         print(f"  Action frames captured: {action_count}")
         
-        # Save report
+        # zapis raportu
         report_path = LOG_DIR / f"wids_evasion_{args.hostapd_ver}_{ts}.txt"
         with open(report_path, "w") as f:
             f.write(f"WIDS Evasion Test\n")

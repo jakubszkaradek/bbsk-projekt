@@ -142,4 +142,4 @@ echo -n "mn command:    "; command -v mn && mn --version 2>&1 | head -1 || warn 
 
 log ""
 log "Setup complete."
-log "Next: run setup/ssh_setup.sh for agent SSH access."
+log "Next: run setup/ssh_setup.sh for SSH access."

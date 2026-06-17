@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 """
-Minimalny test CSA — tylko AP + STA + injection. Bez tcpdump, bez Evil Twin.
-Odpal: sudo python3 csa_test.py 2.10
+minimalny test csa - tylko ap + sta + injekcja, bez tcpdump, bez evil twin
+odpal: sudo python3 csa_test.py 2.10
 """
 import subprocess, time, re, sys
 
 VER = sys.argv[1] if len(sys.argv) > 1 else "2.6"
 BIN = "/opt/hostapd-2.6/bin/hostapd" if VER == "2.6" else "/usr/sbin/hostapd"
 
-print(f"CSA TEST — hostapd {VER} PMF=2")
+print(f"CSA TEST - hostapd {VER} PMF=2")
 
-# Cleanup
+# czyszczenie
 subprocess.run("sudo pkill hostapd; sudo pkill wpa_supplicant; sudo modprobe -r mac80211_hwsim 2>/dev/null; sleep 1; sudo modprobe mac80211_hwsim radios=4", shell=True, capture_output=True)
 time.sleep(2)
 
@@ -20,19 +20,19 @@ ap, sta, inj = ifs[0], ifs[1], ifs[2]
 print(f"AP={ap} STA={sta} INJ={inj}")
 subprocess.run(f"sudo ip link set {ap} up; sudo ip link set {sta} up", shell=True)
 
-# AP
+# ap
 with open("/tmp/csa_ap.conf", "w") as f:
     f.write(f"interface={ap}\ndriver=nl80211\nssid=CSATest\nhw_mode=g\nchannel=6\nwpa=2\nwpa_passphrase=TestPass123\nwpa_key_mgmt=WPA-PSK\nwpa_pairwise=CCMP\nrsn_pairwise=CCMP\nieee80211w=2\nbeacon_int=100\ndtim_period=2\nctrl_interface=/var/run/hostapd\nctrl_interface_group=0\n")
 ap_p = subprocess.Popen(["sudo", BIN, "/tmp/csa_ap.conf"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 time.sleep(3)
 
-# STA
+# sta
 with open("/tmp/csa_sta.conf", "w") as f:
     f.write('ctrl_interface=/var/run/wpa_supplicant\nnetwork={\n    ssid="CSATest"\n    psk="TestPass123"\n    key_mgmt=WPA-PSK\n    pairwise=CCMP\n    ieee80211w=2\n}\n')
 sta_p = subprocess.Popen(["sudo", "wpa_supplicant", "-i", sta, "-c", "/tmp/csa_sta.conf", "-D", "nl80211"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 time.sleep(3)
 
-# Wait association
+# czekaj na asocjacje
 ok = False
 for i in range(30):
     r = subprocess.run(f"sudo iw dev {sta} link", shell=True, capture_output=True, text=True)
@@ -47,12 +47,12 @@ if not ok:
     print("\nFAIL: no association")
     sys.exit(1)
 
-# Before CSA
+# przed csa
 r = subprocess.run(f"sudo iw dev {sta} info", shell=True, capture_output=True, text=True)
 m = re.search(r"channel (\d+)", r.stdout)
 print(f"Before: ch{m.group(1)}")
 
-# Setup monitor + inject
+# monitor + injekcja
 subprocess.run(f"sudo ip link set {inj} down; sudo iw dev {inj} set type monitor; sudo ip link set {inj} up; sudo iw dev {inj} set channel 6", shell=True)
 
 r = subprocess.run(f"ip -c=never link show {ap}", shell=True, capture_output=True, text=True)

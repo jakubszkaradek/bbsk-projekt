@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# PMF Bypass Lab — SSH Setup for AI Agents
+# PMF Bypass Lab — SSH Setup
 # Creates dedicated 'agent' user with SSH key access.
 # VMware NAT Port Forwarding: host:2222 → VM:22
 # ==============================================================================
@@ -67,7 +67,7 @@ systemctl restart ssh
 log ""
 log "===================== SSH SETUP COMPLETE ====================="
 log ""
-log "Private key (copy this to the AI agent host):"
+log "Private key (copy this to the remote host):"
 echo ""
 cat "${AGENT_HOME}/.ssh/id_ed25519"
 echo ""
@@ -80,6 +80,6 @@ log ""
 log "Test connection from host:"
 log "  ssh -i /path/to/saved/private_key -p 2222 agent@localhost"
 log ""
-log "IMPORTANT: After copying the private key, delete it from VM:"
+log "uwaga: po skopiowaniu klucza prywatnego usun go z VM:"
 log "  shred -u ${AGENT_HOME}/.ssh/id_ed25519"
 log "=============================================================="

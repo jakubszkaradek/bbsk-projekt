@@ -1,24 +1,9 @@
 #!/usr/bin/env python3
 """
-Management Frame Sniffer (Scapy-based WIDS component)
-
-Captures management frames on a monitor interface, classifies them by type,
-and logs with timestamps for Wireshark analysis.
-
-Monitored frame types:
-    - Deauthentication (subtype 12)
-    - Disassociation (subtype 10)
-    - Action Frames (subtype 13) — includes CSA, BSS Transition
-    - Beacon (subtype 8)
-    - Probe Request/Response (subtypes 4, 5)
-    - Authentication (subtype 11)
-
-Output:
-    - console_summary: human-readable summary of captured frames
-    - output.pcap: full packet capture for Wireshark analysis
-
-Usage:
-    sudo python3 scapy_sniffer.py --iface <monitor_interface> [--duration 60] [--out captured.pcap]
+sniffer ramek zarzadczych (scapy-based wids)
+przechwytuje ramki zarzadcze na interfejsie monitor, klasyfikuje po typie
+loguje z timestampami do analizy w wireshark
+monitorowane: deauth (12), disassoc (10), action (13), beacon (8), probe req/resp (4,5), auth (11)
 """
 
 import argparse
@@ -35,7 +20,7 @@ from scapy.all import (
     RadioTap,
 )
 
-# Management frame subtype → name mapping
+# mapowanie subtype -> nazwa ramki zarzadczej
 MGMT_SUBTYPES = {
     0:  "Association Request",
     1:  "Association Response",
@@ -50,7 +35,7 @@ MGMT_SUBTYPES = {
     13: "Action",
 }
 
-# Frames of primary interest for PMF analysis
+# ramki szczegolnie istotne dla analizy pmf
 INTEREST_SUBTYPES = {10, 12, 13, 8}
 
 
@@ -76,12 +61,12 @@ def parse_args():
 
 
 def timestamp():
-    """Return ISO 8601 timestamp."""
+    """zwraca timestamp iso 8601"""
     return datetime.now().strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3]
 
 
 class FrameLogger:
-    """Tracks and logs captured management frames."""
+    """sledzi i loguje przechwycone ramki zarzadcze"""
 
     def __init__(self, verbose=False):
         self.packets = []
@@ -89,7 +74,7 @@ class FrameLogger:
         self.verbose = verbose
 
     def log_frame(self, packet):
-        """Process a single captured packet."""
+        """przetwarza pojedynczy przechwycony pakiet"""
         if not packet.haslayer(Dot11):
             return
 
@@ -97,7 +82,7 @@ class FrameLogger:
         subtype = dot11.subtype
 
         if subtype not in MGMT_SUBTYPES:
-            return  # Not a management frame
+            return  # nie ramka zarzadcza
 
         self.packets.append(packet)
         self.counts[subtype] += 1
@@ -106,27 +91,27 @@ class FrameLogger:
             self._print_frame(subtype, dot11)
 
     def _print_frame(self, subtype, dot11):
-        """Print a single frame summary."""
+        """wypisuje podsumowanie ramki"""
         frame_name = MGMT_SUBTYPES.get(subtype, f"Unknown({subtype})")
-        addr1 = dot11.addr1 or "—"
-        addr2 = dot11.addr2 or "—"
-        addr3 = dot11.addr3 or "—"
+        addr1 = dot11.addr1 or "-"
+        addr2 = dot11.addr2 or "-"
+        addr3 = dot11.addr3 or "-"
 
-        # Mark frames of interest
+        # zaznacz ramki istotne dla pmf
         marker = " [!]" if subtype in INTEREST_SUBTYPES else ""
 
         print(f"[{timestamp()}] {frame_name:25s} "
               f"DA={addr1}  SA={addr2}  BSSID={addr3}{marker}")
 
     def print_summary(self):
-        """Print capture summary statistics."""
+        """wypisuje statystyki przechwytywania"""
         print(f"\n{'='*65}")
         print(f"Capture Summary ({len(self.packets)} management frames)")
         print(f"{'='*65}")
         for subtype, name in sorted(MGMT_SUBTYPES.items()):
             count = self.counts.get(subtype, 0)
             if count > 0:
-                interest = " ← PMF-RELEVANT" if subtype in INTEREST_SUBTYPES else ""
+                interest = " <-- PMF-RELEVANT" if subtype in INTEREST_SUBTYPES else ""
                 print(f"  {name:25s} : {count:5d}{interest}")
         print(f"{'='*65}\n")
 
@@ -140,14 +125,14 @@ def main():
     print(f"[{timestamp()}] Duration: {args.duration}s")
     print(f"[{timestamp()}] Output: {args.out}")
     print(f"[{timestamp()}] Monitoring: Deauth, Disassoc, Action, Beacon")
-    print(f"{'─'*65}")
+    print(f"{'-'*65}")
 
     try:
         sniff(
             iface=args.iface,
             prn=logger.log_frame,
             timeout=args.duration,
-            store=0,  # Don't store in scapy's internal buffer
+            store=0,  # nie przechowuj w wewnetrznym buforze scapy
         )
     except KeyboardInterrupt:
         print(f"\n[{timestamp()}] Capture interrupted by user")
@@ -155,7 +140,7 @@ def main():
         print("ERROR: Permission denied. Run with sudo.", file=sys.stderr)
         sys.exit(1)
 
-    # Save to PCAP
+    # zapis do pcap
     if logger.packets:
         wrpcap(args.out, logger.packets)
         print(f"[{timestamp()}] Saved {len(logger.packets)} packets to {args.out}")

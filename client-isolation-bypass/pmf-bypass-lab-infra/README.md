@@ -1,8 +1,8 @@
 # PMF Bypass Lab Infrastructure
 
-Wspolna infrastruktura laboratoryjna do testowania bezpieczenstwa Wi-Fi w izolowanym srodowisku VMware (Kali Linux).
+wspolna infrastruktura laboratoryjna do testowania bezpieczenstwa wifi w izolowanym srodowisku vmware (kali linux)
 
-**Cel:** dostarczyc konfigurowalne srodowisko z Mininet-WiFi, hostapd (PMF + Client Isolation), Scapy, Kismet i Wireshark dla zespolu realizujacego projekt akademicki z zakresu pentestingu sieci bezprzewodowych.
+cel: konfigurowalne srodowisko z mininet-wifi, hostapd (pmf + client isolation), scapy, kismet i wireshark
 
 ## Architektura
 
@@ -22,7 +22,7 @@ pmf-bypass-lab-infra/
 │   └── kismet.conf         # Konfiguracja Kismet jako WIDS
 ├── setup/                  # Skrypty instalacyjne
 │   ├── install.sh          # Instalacja wszystkich zaleznosci
-│   └── ssh_setup.sh        # Konfiguracja SSH dla agentow AI
+│   └── ssh_setup.sh        # Konfiguracja SSH
 ├── docs/
 │   └── PMF_ANALYSIS.md     # Analiza teoretyczna 802.11w/PMF
 └── README.md               # Ten plik
@@ -35,15 +35,6 @@ pmf-bypass-lab-infra/
 - 4 GB RAM minimum (dla Mininet-WiFi + Kismet)
 - Kernel z modulem `mac80211_hwsim`
 
-## Agent AI na VM
-
-Pełna instrukcja + master prompt: [docs/LAB_VM_AGENT.md](docs/LAB_VM_AGENT.md)
-
-```powershell
-# Windows — test połączenia
-ssh kali-lab "cd ~/pmf-bypass-lab-infra && ls baseline"
-```
-
 ## Szybki start
 
 ### 1. Instalacja srodowiska
@@ -54,18 +45,54 @@ chmod +x setup/install.sh setup/ssh_setup.sh
 sudo ./setup/install.sh
 ```
 
-### 2. Konfiguracja SSH dla agentow AI (opcjonalne)
+### 2. Konfiguracja SSH (opcjonalne)
 
 ```bash
 sudo ./setup/ssh_setup.sh
 ```
 
 Po wykonaniu:
-- Skopiuj klucz prywatny do maszyny agenta
+- Skopiuj klucz prywatny do hosta zdalnego
 - W VMware skonfiguruj NAT Port Forwarding: Host:2222 → VM:22
-- Test: `ssh -i klucz -p 2222 agent@localhost`
+- Test: `ssh -i klucz -p 2222 agent@127.0.0.1`
 
-### 3. Uruchomienie topologii
+Na Windows w aliasie `kali-lab` uzywaj `HostName 127.0.0.1`, nie `localhost`.
+Windows OpenSSH moze wybrac IPv6 `::1`, a VMware NAT forward dziala na IPv4.
+
+### 3. Uruchomienie demo ataku na VM
+
+Jesli pracujesz bezposrednio w Kali VM, uruchom pelne demo Client Isolation bypass z VMware shared folder:
+
+```bash
+lab-run status
+lab-run clean
+lab-run status
+sudo python3 /mnt/hgfs/demo/demo_atak_csa.py --yes
+```
+
+Use case:
+- pierwszy `lab-run status` sprawdza stan po starcie VM,
+- `lab-run clean` resetuje hwsim i stan Mininet; direct demo samo przeladuje hwsim z 6 radiami,
+- drugi `lab-run status` potwierdza gotowy lab,
+- `demo_atak_csa.py` uruchamia scenariusz:
+  - legalny AP: PMF=2, `ap_isolate=1`, dwa klienty bez pingow,
+  - Beacon CSA na obu klientow,
+  - Evil Twin: PMF=0, `ap_isolate=0`,
+  - ping `sta1 -> sta2` dziala po reassociation,
+  - PCAP-y trafiaja do `raport/pcaps/csa_injection/`.
+
+Oczekiwane checkpointy:
+
+```text
+BASELINE_ASSOC_PASS
+BASELINE_ISOLATION_PASS
+CSA_SWITCH_PASS
+EVIL_TWIN_REASSOC_PASS
+EVIL_TWIN_PING_PASS
+SUCCESS
+```
+
+### 4. Uruchomienie topologii
 
 ```bash
 # Tryb interaktywny (CLI Mininet)
@@ -82,7 +109,7 @@ mininet-wifi> sta1 ping sta2  # Test (powinien FAIL z izolacja)
 mininet-wifi> py sta1.cmd('iw dev sta1-wlan0 link')  # Status polaczenia
 ```
 
-### 4. Uruchomienie testow bazowych
+### 5. Uruchomienie testow bazowych
 
 ```bash
 # Test izolacji klientow (powinien PASS)
@@ -95,7 +122,7 @@ sudo python3 baseline/test_pmf.py
 sudo python3 baseline/test_csa.py
 ```
 
-### 5. Sniffer ramek zarzadzajacych
+### 6. Sniffer ramek zarzadzajacych
 
 ```bash
 # Przechwytywanie ramek na interfejsie monitora AP

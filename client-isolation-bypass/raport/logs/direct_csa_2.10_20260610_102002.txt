@@ -1,9 +1,0 @@
-Test: Direct hwsim CSA Injection
-hostapd: 2.10
-PMF: 2
-Legit channel: 6
-Evil channel: 11
-Beacon count: 50
-Result: SUCCESS
-Pre channel: 6 → Post channel: 11
-Associated after: True

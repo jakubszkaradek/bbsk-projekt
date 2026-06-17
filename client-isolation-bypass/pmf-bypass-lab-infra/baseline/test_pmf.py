@@ -1,21 +1,8 @@
 #!/usr/bin/env python3
 """
-Baseline Test: PMF (802.11w) Protection Verification
-
-Tests whether the AP correctly protects Robust Management Frames.
-
-Test 1 — Deauth Spoofing:
-    Attempt to send a spoofed deauthentication frame from outside the network.
-    With PMF=required (ieee80211w=2), the client should IGNORE unprotected deauth
-    frames and remain connected.
-
-Expected result:
-    - Spoofed (unprotected) deauth frame is REJECTED by station
-    - Station remains associated with the AP
-    - PMF protection verified
-
-Usage:
-    sudo python3 test_pmf.py
+test bazowy: weryfikacja ochrony pmf (802.11w)
+sprawdza czy ap poprawnie chroni robust management frames
+wysyla sfalszowana ramke deauth z zewnatrz sieci, klient z pmf=required powinien ja zignorowac
 """
 
 import os
@@ -32,13 +19,13 @@ WPA_CONF = os.path.join(BASE_DIR, "configs", "wpa_supplicant.conf")
 
 
 def check_association(sta):
-    """Check if station is associated with AP."""
+    """sprawdza czy stacja jest polaczona z ap"""
     result = sta.cmd(f"iw dev wlan0 link")
     return "Not connected" not in result
 
 
 def get_sta_bssid(sta):
-    """Extract BSSID (AP MAC) from iw link output."""
+    """wyciaga bssid (mac ap) z iw link"""
     result = sta.cmd(f"iw dev wlan0 link")
     for line in result.split("\n"):
         if "Connected to" in line:
@@ -47,7 +34,7 @@ def get_sta_bssid(sta):
 
 
 def run_test():
-    """Run PMF baseline verification test."""
+    """uruchamia test weryfikacji pmf"""
     net = Mininet_wifi()
 
     info("*** Creating nodes\n")
@@ -75,18 +62,18 @@ def run_test():
     info("\n*** Waiting for association...\n")
     time.sleep(15)
 
-    # ---- Pre-test: verify association ----
+    # sprawdzenie asocjacji przed testem
     info("=== Pre-Test Association Check ===\n")
     if check_association(sta1):
         info(f"  {sta1.name}: ASSOCIATED\n")
         ap_bssid = get_sta_bssid(sta1)
         info(f"  AP BSSID: {ap_bssid}\n")
     else:
-        info(f"  {sta1.name}: NOT ASSOCIATED — cannot run PMF test\n")
+        info(f"  {sta1.name}: NOT ASSOCIATED - cannot run PMF test\n")
         net.stop()
         return False
 
-    # ---- Test: Spoofed Deauth Frame ----
+    # test: sfalszowana ramka deauth
     info("=== Test: Sending Spoofed (Unprotected) Deauth Frame ===\n")
 
     sta1_mac = sta1.wintfs[0].mac
@@ -95,8 +82,8 @@ def run_test():
     info(f"  STA MAC:   {sta1_mac}\n")
     info(f"  AP MAC:    {ap_mac}\n")
 
-    # Use scapy via sta1's shell to inject a raw deauth frame
-    # This simulates an external attacker who does NOT have the PMF keys
+    # uzywamy scapy przez powloke sta1 do wstrzykniecia surowej ramki deauth
+    # to symuluje atakujacego z zewnatrz ktory nie ma kluczy pmf
     scapy_cmd = f"""
 python3 -c "
 from scapy.all import RadioTap, Dot11, Dot11Deauth, sendp
@@ -118,7 +105,7 @@ print('Deauth frames sent.')
     result = sta1.cmd(scapy_cmd)
     info(result)
 
-    # --- Wait and check if station is still connected ---
+    # czekamy i sprawdzamy czy stacja nadal polaczona
     time.sleep(5)
 
     info("\n=== Post-Attack Association Check ===\n")

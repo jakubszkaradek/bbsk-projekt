@@ -1,19 +1,7 @@
 #!/usr/bin/env python3
 """
-PMF Bypass Lab — Baseline Network Topology (Mininet-WiFi v2.0)
-
-Topology:
-    AP1 ─── sta1  (client)
-    AP1 ─── sta2  (client)
-    AP1 ─── sta3  (client)
-
-Security baseline:
-    - WPA2-PSK with CCMP
-    - PMF required (ieee80211w=2)
-    - Client Isolation enabled (ap_isolate=1)
-
-Usage:
-    sudo python3 lab_topology.py [--kismet]
+topologia bazowa labu pmf bypass (Mininet-WiFi v2.0)
+1 ap + 3 stacje, wpa2-psk z ccmp, pmf required (ieee80211w=2), client isolation (ap_isolate=1)
 """
 
 import argparse
@@ -34,12 +22,12 @@ WPA_CONF = os.path.join(BASE_DIR, "configs", "wpa_supplicant.conf")
 
 
 def build_topo():
-    """Build the baseline lab topology with 1 AP and 3 stations."""
+    """buduje topologie labu: 1 ap + 3 stacje"""
     net = Mininet_wifi()
 
     info("*** Creating nodes\n")
 
-    # Access Point with hostapd config (PMF + Client Isolation)
+    # access point z hostapd config (pmf + client isolation)
     ap1 = net.addAccessPoint(
         "ap1",
         ssid="PMF_Lab_Secure",
@@ -50,7 +38,7 @@ def build_topo():
         failMode="standalone",
     )
 
-    # Three client stations with wpa_supplicant config
+    # trzy stacje klienckie z wpa_supplicant config
     sta1 = net.addStation(
         "sta1",
         position="30,50,0",
@@ -85,12 +73,12 @@ def build_topo():
 
 
 def run_cli(net):
-    """Drop into interactive Mininet CLI for manual testing."""
+    """odpala interaktywne cli Mininet do recznego testowania"""
     CLI(net)
 
 
 def run_headless(net, ap1, sta1, sta2, sta3):
-    """Run headless with baseline verification, then exit."""
+    """odpala bez interakcji z weryfikacja bazowa, potem konczy"""
     info("\n*** Starting network\n")
     net.start()
 
@@ -139,7 +127,7 @@ if __name__ == "__main__":
             result = sta.cmd("iw dev {}-wlan0 link".format(sta.name))
             info(result.strip()[:80] + "\n")
 
-        # Optional: start Kismet on ap1's monitor interface
+        # opcjonalnie: kismet na interfejsie monitor ap1
         if args.kismet:
             info("*** Starting Kismet on ap1 monitor interface\n")
             ap1.cmd("kismet -c ap1-mp1 &")

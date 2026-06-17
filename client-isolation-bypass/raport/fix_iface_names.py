@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fix interface names in all test scripts: sta1-wlan0 → wlan0 inside Mininet namespaces."""
+"""poprawia nazwy interfejsow w skryptach testowych: sta1-wlan0 -> wlan0 wewnatrz namespace Mininet"""
 import glob, re
 
 files = [
@@ -11,8 +11,7 @@ for fpath in files:
     with open(fpath, 'r') as f:
         content = f.read()
     
-    # Replace {sta.name}-wlan0 → wlan0 in f-strings
-    # Pattern: {something.name}-wlan0
+    # zamien {sta.name}-wlan0 -> wlan0 w f-stringach
     original = content
     content = re.sub(r'\{(\w+)\.name\}-wlan0', r'wlan0', content)
     

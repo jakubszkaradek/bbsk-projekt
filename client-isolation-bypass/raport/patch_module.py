@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Patch Mininet-WiFi link.py to fix wintfs[0].mac=None issue."""
+"""latka na Mininet-WiFi link.py naprawiajaca wintfs[0].mac=None"""
 import re
 
 path = '/opt/mininet-wifi/mn_wifi/link.py'
@@ -23,10 +23,10 @@ if old in content:
     content = content.replace(old, new)
     with open(path, 'w') as f:
         f.write(content)
-    print('PATCHED link.py — wintfs[0].mac fallback added')
+    print('PATCHED link.py - wintfs[0].mac fallback added')
 else:
     print('ALREADY PATCHED or pattern not found')
-    # Check what's there
+    # sprawdz co tam jest
     idx = content.find('if not intf.mac')
     if idx >= 0:
         print('Found at offset', idx)

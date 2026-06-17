@@ -4,9 +4,9 @@
 
 ## 1. Opis ataku
 
-SA (Security Association) Query to mechanizm obronny PMF: gdy stacja otrzyma podejrzaną ramkę Robust Management (np. deauth), wysyła do AP zapytanie SA Query: "czy naprawdę wysłałeś tę ramkę?". AP odpowiada SA Query Response. Jeśli AP potwierdzi — stacja akceptuje ramkę. Jeśli nie — ramka jest odrzucana.
+SA (Security Association) Query to mechanizm obronny PMF: gdy stacja otrzyma podejrzana ramke Robust Management (np. deauth), wysyla do AP zapytanie SA Query: "czy naprawde wyslales te ramke?". AP odpowiada SA Query Response. Jesli AP potwierdzi — stacja akceptuje ramke. Jesli nie — ramka jest odrzucana.
 
-Atak **SA Query Flood** próbuje przeciążyć ten mechanizm: atakujący wysyła bardzo dużo sfałszowanych ramek deauth w krótkim czasie. Każda ramka powoduje wysłanie SA Query przez stację do AP. Jeśli AP nie nadąży z odpowiedziami, mechanizm może ulec timeoutowi, a stacja może zaakceptować niezweryfikowaną ramkę.
+Atak **SA Query Flood** probuje przeciazyc ten mechanizm: atakujacy wysyla bardzo duzo sfalszowanych ramek deauth w krotkim czasie. Kazda ramka powoduje wyslanie SA Query przez stacje do AP. Jesli AP nie nadazy z odpowiedziami, mechanizm moze ulec timeoutowi, a stacja moze zaakceptowac niezweryfikowana ramke.
 
 ## 2. Implementacja
 
@@ -19,7 +19,7 @@ frame = RadioTap() / Dot11(
     addr3=ap_mac,
 ) / Dot11Deauth(reason=7)
 
-# Wysyłanie z dużą częstotliwością
+# Wysylanie z duza czestotliwoscia
 for i in range(count):
     sendp(frame, iface='wlan0', count=10, inter=0.01, verbose=False)
     sent_count += 10
@@ -29,13 +29,13 @@ for i in range(count):
 ## 3. Wyniki
 
 **Parametry ataku:**
-| Parametr | Wartość |
+| Parametr | Wartosc |
 |----------|---------|
 | Cel | sta1 |
-| Docelowa częstotliwość | 50 ramek/sekundę |
+| Docelowa czestotliwosc | 50 ramek/sekunde |
 | Czas trwania | ~15 sekund |
-| Łączna liczba wysłanych ramek | 110 |
-| Rzeczywista częstotliwość | ~7 ramek/sekundę |
+| Laczna liczba wyslanych ramek | 110 |
+| Rzeczywista czestotliwosc | ~7 ramek/sekunde |
 
 ```
 [2026-06-09T09:49:20] === Analysis ===
@@ -44,24 +44,24 @@ for i in range(count):
        AP handled 110 deauth attempts without issue.
 ```
 
-**Wynik:** Atak **NIESKUTECZNY**. Stacja pozostała połączona. PMF wytrzymał zalew 110 ramkami deauth.
+**Wynik:** Atak **NIESKUTECZNY**. Stacja pozostala polaczona. PMF wytrzymal zalew 110 ramkami deauth.
 
 ## 4. Analiza
 
-Rzeczywista częstotliwość wysyłania (~7 ramek/s) jest niższa od docelowej (50/s) ze względu na narzut związany z wywołaniami `sta.cmd()` — każde wysłanie 10 ramek wymaga osobnego procesu Pythona w przestrzeni nazw Mininet. Jest to ograniczenie środowiska testowego, nie samego ataku.
+Rzeczywista czestotliwosc wysylania (~7 ramek/s) jest nizsza od docelowej (50/s) ze wzgledu na narzut zwiazany z wywolaniami `sta.cmd()` — kazde wyslanie 10 ramek wymaga osobnego procesu Pythona w przestrzeni nazw Mininet. Jest to ograniczenie srodowiska testowego, nie samego ataku.
 
-Mimo to, nawet 110 ramek deauth nie spowodowało rozłączenia stacji. Sugeruje to, że mechanizm SA Query jest odporny na ataki typu flood — AP nadąża z odpowiadaniem na zapytania SA Query, a stacja nie akceptuje niezweryfikowanych ramek.
+Mimo to, nawet 110 ramek deauth nie spowodowalo rozlaczenia stacji. Sugeruje to, ze mechanizm SA Query jest odporny na ataki typu flood — AP nadaza z odpowiadaniem na zapytania SA Query, a stacja nie akceptuje niezweryfikowanych ramek.
 
-Należy zauważyć, że test przeprowadzono w środowisku wirtualnym, gdzie opóźnienia sieciowe są minimalne. W środowisku rzeczywistym, przy większych opóźnieniach i rzeczywistej mocy obliczeniowej AP, wyniki mogą się różnić.
+Nalezy zauwazyc, ze test przeprowadzono w srodowisku wirtualnym, gdzie opoznienia sieciowe sa minimalne. W srodowisku rzeczywistym, przy wiekszych opoznieniach i rzeczywistej mocy obliczeniowej AP, wyniki moga sie roznic.
 
 ## 5. Uwagi
 
-- Rzeczywisty limit ramek na sekundę w teście był ograniczony przez narzut Mininet-WiFi
-- Docelowy atak w warunkach rzeczywistych mógłby osiągnąć znacznie wyższe częstotliwości
-- Test nie mierzył bezpośrednio ruchu SA Query/Response — wymagana dodatkowa analiza Wireshark
+- Rzeczywisty limit ramek na sekunde w tescie byl ograniczony przez narzut Mininet-WiFi
+- Docelowy atak w warunkach rzeczywistych moglby osiagnac znacznie wyzsze czestotliwosci
+- Test nie mierzyl bezposrednio ruchu SA Query/Response — wymagana dodatkowa analiza Wireshark
 
 ---
 
-**[✗ SCREENSHOT: Terminal — output sa_query_flood.py pokazujący licznik ramek i PASS]**  
-**[✗ SCREENSHOT: Wireshark — zalew ramek deauth (wiele ramek w krótkim odstępie)]**  
-**[✗ SCREENSHOT: Wireshark — ramka SA Query (Action Frame) wysłana przez stację do AP]**
+**[screenshot: Terminal — output sa_query_flood.py pokazujacy licznik ramek i PASS]**  
+**[screenshot: Wireshark — zalew ramek deauth (wiele ramek w krotkim odstepie)]**  
+**[screenshot: Wireshark — ramka SA Query (Action Frame) wyslana przez stacje do AP]**

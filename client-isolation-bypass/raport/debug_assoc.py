@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check if hostapd config is generated and why hostapd doesn't start."""
+"""sprawdza czy hostapd config jest generowany i dlaczego hostapd nie startuje"""
 from mn_wifi.net import Mininet_wifi
 from mininet.log import setLogLevel, info
 import time, os

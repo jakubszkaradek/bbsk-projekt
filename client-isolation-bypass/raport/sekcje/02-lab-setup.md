@@ -12,7 +12,7 @@
 │  │                                        │  │
 │  │   AP1 (hostapd) ─── sta1 (klient)      │  │
 │  │   SSID: PMF_Lab_Secure                 │  │
-│  │   Kanał: 6, WPA2-PSK, CCMP              │  │
+│  │   Kanal: 6, WPA2-PSK, CCMP              │  │
 │  │   PMF: required (ieee80211w=2)          │  │
 │  │   Client Isolation: enabled             │  │
 │  │                                        │  │
@@ -64,27 +64,32 @@ network={
 ## 4. Proces uruchomienia laboratorium
 
 ```bash
-# 1. Załadowanie modułu wirtualnych interfejsów WiFi
+# 1. Zaladowanie modulu wirtualnych interfejsow WiFi
 sudo modprobe mac80211_hwsim radios=4
 
 # 2. Uruchomienie topologii
 sudo python3 topology/lab_topology.py --cli
 
-# 3. Weryfikacja połączenia stacji
+# 3. Weryfikacja polaczenia stacji
 mininet-wifi> sta1 iw dev wlan0 link
 ```
 
-## 5. Weryfikacja środowiska
+Uwaga operacyjna: powyzszy tryb dotyczy baseline Mininet-WiFi. Aktualne demo `direct_hwsim_csa.py`
+nie korzysta z Mininet i samo przeladowuje `mac80211_hwsim` z 6 radiami:
+legalny AP, dwa klienty w `ip netns`, injection monitor, capture monitor i Evil Twin.
 
-Przed rozpoczęciem testów zweryfikowano:
+## 5. Weryfikacja srodowiska
+
+Przed rozpoczeciem testow zweryfikowano:
 - [x] 4 wirtualne interfejsy radiowe (wlan0-wlan3)
+- [x] 6 radii hwsim dla direct Evil Twin demo
 - [x] Open vSwitch aktywny
 - [x] Python 3.13.12 + Scapy 2.7.01
 - [x] Mininet-WiFi 2.7 zaimportowane poprawnie
-- [x] hostapd v2.10 (systemowy) + v2.6 (zbudowany ze źródła)
+- [x] hostapd v2.10 (systemowy) + v2.6 (zbudowany ze zrodla)
 
 ---
 
-**[✗ SCREENSHOT: Terminal — output polecenia `iw dev` pokazujący 4 interfejsy wlan0-wlan3]**  
-**[✗ SCREENSHOT: Terminal — uruchomienie topologii Mininet-WiFi]**  
-**[✗ SCREENSHOT: Wireshark — Beacon frame z SSID "PMF_Lab_Secure" i RSN IE z PMF capabilities]**
+**[screenshot: Terminal — output polecenia `iw dev` pokazujacy 4 interfejsy wlan0-wlan3]**  
+**[screenshot: Terminal — uruchomienie topologii Mininet-WiFi]**  
+**[screenshot: Wireshark — Beacon frame z SSID "PMF_Lab_Secure" i RSN IE z PMF capabilities]**

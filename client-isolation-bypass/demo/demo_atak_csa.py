@@ -1,12 +1,9 @@
 #!/usr/bin/env python3
 """
-DEMO: Beacon CSA Injection PMF bypass
-====================================
-
-Terminal-safe guided wrapper around raport/direct_hwsim_csa.py.
-Run on the Kali VM:
-    sudo python3 /mnt/hgfs/demo/demo_atak_csa.py
-    sudo python3 /tmp/demo_atak_csa.py --yes
+demo: obejscie client isolation przez evil twin + csa
+wrapper terminalowy wokol raport/direct_hwsim_csa.py
+dwa klienty lacza sie do legalnego ap z ap_isolate=1, potem csa przerzuca je na evil twin bez izolacji
+dowod: ping blokowany->dziala, pcapy zapisywane
 """
 
 import argparse
@@ -24,13 +21,24 @@ if hasattr(sys.stdout, "reconfigure"):
 
 DEFAULT_HOSTAPD = "2.10"
 DEFAULT_PMF = 2
+DEFAULT_STA_PMF = 1
+DEFAULT_EVIL_PMF = 0
 DEFAULT_EVIL_CHANNEL = 11
 DEFAULT_BEACON_COUNT = 50
 DEFAULT_WAIT = 15
+DEFAULT_EVIL_WAIT = 30
 DEFAULT_RETRIES = 3
+DEFAULT_CSA_BURSTS = 3
+DEFAULT_UNTIL_SUCCESS = True
+DEFAULT_CLIENTS = 2
+DEFAULT_RADIOS = 6
+DEFAULT_DEMO_ISOLATION = True
+DEFAULT_CAPTURE_PING = True
+DEFAULT_EXPERIMENTAL_WMEDIUMD_LOSS = False
 
 
 def header(title):
+    """naglowek sekcji demo"""
     print()
     print("=" * 60)
     print(title)
@@ -39,14 +47,17 @@ def header(title):
 
 
 def info(text):
+    """info o stanie"""
     print(f"[*] {text}")
 
 
 def ok(text):
+    """komunikat sukcesu"""
     print(f"[OK] {text}")
 
 
 def fail(text):
+    """komunikat bledu"""
     print(f"[!] {text}")
 
 
@@ -60,7 +71,7 @@ def pause(enabled):
 
 
 def sanitize(line):
-    """Keep line-buffer friendly output while preserving UTF-8 symbols."""
+    """zachowuje utf-8, usuwa crlf"""
     return line.rstrip("\r\n")
 
 
@@ -118,25 +129,53 @@ def build_direct_cmd(args, direct_script):
     cmd.extend([
         "--hostapd-ver", args.hostapd_ver,
         "--pmf", str(args.pmf),
+        "--sta-pmf", str(args.sta_pmf),
+        "--evil-pmf", str(args.evil_pmf),
         "--evil-channel", str(args.evil_channel),
         "--beacon-count", str(args.beacon_count),
         "--wait", str(args.wait),
+        "--evil-wait", str(args.evil_wait),
         "--retries", str(args.retries),
+        "--csa-bursts", str(args.csa_bursts),
+        "--poll-interval", str(args.poll_interval),
+        "--burst-gap", str(args.burst_gap),
+        "--clients", str(args.clients),
+        "--radios", str(args.radios),
     ])
 
-    if args.no_wmediumd:
+    if args.until_success:
+        cmd.append("--until-success")
+
+    if args.experimental_wmediumd_loss:
+        cmd.append("--wmediumd-loss-after-csa")
+        if args.wmediumd_fallback_disconnect:
+            cmd.append("--wmediumd-fallback-disconnect")
+    elif args.no_wmediumd:
         cmd.append("--no-wmediumd")
+
+    if args.demo_isolation:
+        cmd.append("--demo-isolation")
+    else:
+        cmd.append("--no-demo-isolation")
+
+    if args.capture_ping:
+        cmd.append("--capture-ping")
+    else:
+        cmd.append("--no-capture-ping")
 
     return cmd
 
 
 def fallback_cleanup():
-    """Best-effort lab cleanup if the wrapped direct script is interrupted."""
+    """awaryjne sprzatanie labu jesli skrypt zostanie przerwany"""
     cleanup_cmds = [
         ["sudo", "pkill", "-x", "hostapd"],
         ["sudo", "pkill", "-f", "^/sbin/wpa_supplicant -i wlan"],
+        ["sudo", "pkill", "-x", "wpa_supplicant"],
         ["sudo", "pkill", "-x", "tcpdump"],
         ["sudo", "pkill", "-x", "wmediumd"],
+        ["sudo", "ip", "netns", "delete", "sta1ns"],
+        ["sudo", "ip", "netns", "delete", "sta2ns"],
         ["sudo", "modprobe", "-r", "mac80211_hwsim"],
     ]
     for cmd in cleanup_cmds:
@@ -189,42 +228,56 @@ def stream_command(cmd):
 
 
 def explain_intro(args):
-    header("DEMO: PMF Bypass przez Beacon CSA Injection")
-    print("Scenariusz pokazuje obejscie PMF (802.11w) przez Beacon CSA.")
-    print("PMF chroni ramki robust management, np. Deauth i Disassoc.")
-    print("Beacon pozostaje ramka non-robust, wiec klient nadal przetwarza CSA IE.")
+    header("DEMO: Client Isolation Bypass przez Evil Twin + CSA")
+    print("Scenariusz pokazuje roznice miedzy polityka oryginalnego AP i Evil Twina.")
+    print("Najpierw dwa klienty sa w legalnej sieci z ap_isolate=1 i nie moga sie pingowac.")
+    print("Potem Beacon CSA przerzuca klientow na kanal Evil Twina bez izolacji klientow.")
     print()
-    print("Atak wysyla falszywe Beacony z Channel Switch Announcement.")
-    print("Stacja zmienia kanal z 6 na 11, mimo PMF=2.")
-    print("Evil Twin czeka na kanale 11 i obserwujemy reassocjacje klienta.")
+    print("Dowod koncowy: ci sami klienci po reassociation do Evil Twina moga sie pingowac.")
+    print("Skrypt zapisuje PCAP z baseline ping, CSA/reassociation i pingiem na Evil Twin.")
     print()
     print("Parametry:")
     print(f"  hostapd:       {args.hostapd_ver}")
-    print(f"  PMF:           {args.pmf}")
+    print(f"  Legit AP PMF:  {args.pmf}")
+    print(f"  STA PMF:       {args.sta_pmf}")
+    print(f"  Evil AP PMF:   {args.evil_pmf}")
     print(f"  Evil channel:  {args.evil_channel}")
+    print(f"  Clients:       {args.clients}")
+    print(f"  hwsim radios:  {args.radios}")
+    print(f"  Isolation demo:{' ON' if args.demo_isolation else ' OFF'}")
+    print(f"  Ping PCAP:     {'ON' if args.capture_ping else 'OFF'}")
     print(f"  Beacon count:  {args.beacon_count}")
-    print(f"  Retries:       {args.retries}")
-    print(f"  wmediumd:      {'OFF' if args.no_wmediumd else 'ON'}")
+    print(f"  CSA bursts:    {args.csa_bursts}")
+    print(f"  Retry mode:    {'until SUCCESS' if args.until_success else f'{args.retries} retries'}")
+    if args.experimental_wmediumd_loss:
+        wmediumd_mode = "EXPERIMENTAL loss-after-CSA"
+    else:
+        wmediumd_mode = "OFF" if args.no_wmediumd else "ON"
+    print(f"  wmediumd:      {wmediumd_mode}")
+    if args.wmediumd_fallback_disconnect:
+        print("  fallback:      explicit disconnect if wmediumd-loss does not roam")
 
 
 def explain_attack():
     header("Co pokazuje demo")
-    print("1. Legalny AP startuje z PMF=2 na kanale 6.")
-    print("2. Stacja laczy sie normalnie przez WPA2/PMF.")
-    print("3. Evil Twin czeka na kanale 11.")
-    print("4. Interfejs monitor wysyla Beacon z CSA IE tag 37.")
-    print("5. Stacja przetwarza Beacon, bo PMF nie chroni Beaconow.")
-    print("6. Po zmianie kanalu test symuluje izolacje fizycznego medium.")
-    print("7. Stacja probuje ponownie znalezc SSID i moze wejsc w Evil Twin.")
+    print("1. Legalny AP startuje z PMF=2 i ap_isolate=1 na kanale 6.")
+    print("2. Dwa klienty lacza sie przez WPA2/PMF w osobnych network namespace.")
+    print("3. Skrypt probuje ping sta1 -> sta2; wynik powinien byc blokowany.")
+    print("4. Evil Twin startuje z tym samym SSID na kanale 11, ale bez izolacji klientow.")
+    print("5. Interfejs monitor wysyla Beacon z CSA IE tag 37 do obu klientow.")
+    print("6. Po zmianie kanalu test czeka na reassociation obu klientow do Evil Twina.")
+    print("7. Skrypt ponawia ping sta1 -> sta2; wynik powinien dzialac.")
     print()
-    print("Oczekiwany dowod: SUCCESS, kanal 11, reassocjacja i log direct_csa_*.")
+    print("Oczekiwany dowod: BASELINE_ISOLATION_PASS, EVIL_TWIN_REASSOC_PASS, EVIL_TWIN_PING_PASS.")
+    print("PCAP-y beda zapisane w raport/pcaps/csa_injection/.")
+    print("Jesli timing hwsim nie zlapie CSA za pierwszym razem, demo probuje dalej.")
 
 
 def print_result(rc):
     header("Wynik demo")
     if rc == 0:
         ok("Demo zakonczone sukcesem.")
-        print("Do screenshotow uzyj terminala z linia SUCCESS oraz logow w raport/logs/.")
+        print("Do screenshotow uzyj linii PASS/SUCCESS oraz PCAP/logow w raport/.")
         return 0
 
     fail(f"Demo zakonczylo sie kodem {rc}.")
@@ -240,12 +293,31 @@ def parse_args():
     )
     parser.add_argument("--hostapd-ver", default=DEFAULT_HOSTAPD, choices=["2.6", "2.10"])
     parser.add_argument("--pmf", type=int, default=DEFAULT_PMF, choices=[0, 1, 2])
+    parser.add_argument("--sta-pmf", type=int, default=DEFAULT_STA_PMF, choices=[0, 1, 2])
+    parser.add_argument("--evil-pmf", type=int, default=DEFAULT_EVIL_PMF, choices=[0, 1, 2])
     parser.add_argument("--evil-channel", type=int, default=DEFAULT_EVIL_CHANNEL)
     parser.add_argument("--beacon-count", type=int, default=DEFAULT_BEACON_COUNT)
     parser.add_argument("--wait", type=int, default=DEFAULT_WAIT)
+    parser.add_argument("--evil-wait", type=int, default=DEFAULT_EVIL_WAIT)
     parser.add_argument("--retries", type=int, default=DEFAULT_RETRIES)
+    parser.add_argument("--csa-bursts", type=int, default=DEFAULT_CSA_BURSTS)
+    parser.add_argument("--poll-interval", type=float, default=1.0)
+    parser.add_argument("--burst-gap", type=float, default=1.0)
+    parser.add_argument("--clients", type=int, default=DEFAULT_CLIENTS)
+    parser.add_argument("--radios", type=int, default=DEFAULT_RADIOS)
+    parser.add_argument("--demo-isolation", dest="demo_isolation", action="store_true", default=DEFAULT_DEMO_ISOLATION)
+    parser.add_argument("--no-demo-isolation", dest="demo_isolation", action="store_false")
+    parser.add_argument("--capture-ping", dest="capture_ping", action="store_true", default=DEFAULT_CAPTURE_PING)
+    parser.add_argument("--no-capture-ping", dest="capture_ping", action="store_false")
+    parser.add_argument("--until-success", action="store_true", default=DEFAULT_UNTIL_SUCCESS)
+    parser.add_argument("--no-until-success", action="store_false", dest="until_success")
     parser.add_argument("--no-wmediumd", action="store_true", default=True)
     parser.add_argument("--with-wmediumd", action="store_false", dest="no_wmediumd")
+    parser.add_argument("--experimental-wmediumd-loss", action="store_true",
+                        default=DEFAULT_EXPERIMENTAL_WMEDIUMD_LOSS,
+                        help="Experimental: use wmediumd loss updates after CSA instead of default force-disconnect")
+    parser.add_argument("--wmediumd-fallback-disconnect", action="store_true",
+                        help="With --experimental-wmediumd-loss, fall back to explicit disconnect if roaming does not happen")
     parser.add_argument("--direct-script", help="Path to raport/direct_hwsim_csa.py")
     parser.add_argument("--yes", action="store_true", help="Do not pause between sections")
     return parser.parse_args()

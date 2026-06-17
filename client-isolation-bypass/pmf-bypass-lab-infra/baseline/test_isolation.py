@@ -1,15 +1,8 @@
 #!/usr/bin/env python3
 """
-Baseline Test: Client Isolation Verification
-
-Verifies that AP properly blocks L2 traffic between associated stations.
-With ap_isolate=1, direct communication between sta1, sta2, sta3 must fail.
-
-Expected result: ping from sta1 to sta2 FAILS (100% packet loss).
-If ping succeeds → Client Isolation is broken or misconfigured.
-
-Usage:
-    sudo python3 test_isolation.py
+test bazowy: weryfikacja client isolation
+sprawdza czy ap poprawnie blokuje ruch l2 miedzy stacjami
+z ap_isolate=1 ping miedzy sta1 a sta2 powinien miec 100% strat
 """
 
 import os
@@ -28,7 +21,7 @@ WPA_CONF = os.path.join(BASE_DIR, "configs", "wpa_supplicant.conf")
 
 
 def run_test():
-    """Run client isolation baseline test."""
+    """uruchamia test client isolation"""
     net = Mininet_wifi()
 
     info("*** Creating nodes\n")
@@ -57,31 +50,31 @@ def run_test():
     info("\n*** Waiting for association...\n")
     time.sleep(15)
 
-    # ---- Verify IP assignment ----
+    # weryfikacja ip
     info("=== IP Address Assignment ===\n")
     for sta in [sta1, sta2, sta3]:
         ip = sta.IP()
         info(f"  {sta.name}: {ip}\n")
 
-    # ---- Test: ping sta1 -> sta2 ----
+    # test: ping sta1 -> sta2
     sta2_ip = sta2.IP()
     info(f"\n=== PING Test: {sta1.name} -> {sta2.name} ({sta2_ip}) ===\n")
 
-    # 5 pings, 2 second timeout
+    # 5 pingow, timeout 2s
     result = sta1.cmd(f"ping -c 5 -W 2 {sta2_ip}")
     info(result)
 
-    # ---- Analyze result ----
+    # analiza wyniku
     if "100% packet loss" in result or "0 received" in result or "Network is unreachable" in result:
         info("\n[PASS] Client Isolation working correctly.\n")
         info("       Direct L2 communication between stations is BLOCKED.\n")
         test_passed = True
     else:
         info("\n[FAIL] Client Isolation NOT enforced!\n")
-        info("       Stations can communicate directly — isolation is broken.\n")
+        info("       Stations can communicate directly - isolation is broken.\n")
         test_passed = False
 
-    # ---- Optional: ARP test from sta3 ----
+    # opcjonalnie: test arp z sta3
     info(f"\n=== ARP Test: {sta3.name} attempting ARP for {sta1.name} ===\n")
     arp_result = sta3.cmd(f"arping -c 3 -I wlan0 {sta1.IP()}")
     info(arp_result)

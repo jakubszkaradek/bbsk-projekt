@@ -51,7 +51,7 @@ cmd_sync() {
 cmd_status() {
     ensure_hostapd_210
     echo "=== Lab Status ==="
-    echo -n "hwsim radios: "; iw dev 2>/dev/null | grep -c Interface || echo "0"
+    echo -n "hwsim radios: "; iw dev 2>/dev/null | awk '/Interface / {n++} END {print n+0}'
     echo -n "OVS: "; sudo systemctl is-active openvswitch-switch 2>/dev/null || echo "inactive"
     echo -n "Python: "; python3 --version
     echo -n "Scapy: "; python3 -c "import scapy;print(scapy.__version__)" 2>/dev/null || echo "MISSING"

@@ -1,7 +1,6 @@
 
-
 def fmtBps(bps, fmt):
-    """Format bits per second."""
+    """formatuje bits per second"""
     bps = float(bps)
     if bps >= 1e9:
         return '%.1f Gbps' % (bps / 1e9)

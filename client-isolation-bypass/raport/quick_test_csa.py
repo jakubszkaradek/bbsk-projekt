@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Quick CSA test — hostapd 2.10, no tcpdump, no Evil Twin."""
+"""szybki test csa - hostapd 2.10, bez tcpdump, bez evil twin"""
 import subprocess, time, re, sys
 
-# Cleanup
+# czyszczenie
 subprocess.run("sudo pkill hostapd; sudo pkill wpa_supplicant; sudo modprobe -r mac80211_hwsim 2>/dev/null; sleep 1; sudo modprobe mac80211_hwsim radios=4", shell=True, capture_output=True)
 time.sleep(2)
 
@@ -12,28 +12,28 @@ ap, sta, inj = ifs[0], ifs[1], ifs[2]
 
 subprocess.run(f"sudo ip link set {ap} up; sudo ip link set {sta} up", shell=True)
 
-# AP config
+# konfiguracja ap
 cfg = f"interface={ap}\ndriver=nl80211\nssid=QTest\nhw_mode=g\nchannel=6\nwpa=2\nwpa_passphrase=TestPass123\nwpa_key_mgmt=WPA-PSK\nwpa_pairwise=CCMP\nrsn_pairwise=CCMP\nieee80211w=2\nbeacon_int=100\ndtim_period=2\nctrl_interface=/var/run/hostapd\nctrl_interface_group=0\n"
 with open("/tmp/qt_ap.conf", "w") as f:
     f.write(cfg)
 ap_p = subprocess.Popen(["sudo", "hostapd", "/tmp/qt_ap.conf"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 time.sleep(3)
 
-# STA
+# konfiguracja sta
 cfg2 = 'ctrl_interface=/var/run/wpa_supplicant\nnetwork={\n    ssid="QTest"\n    psk="TestPass123"\n    key_mgmt=WPA-PSK\n    pairwise=CCMP\n    ieee80211w=2\n}\n'
 with open("/tmp/qt_sta.conf", "w") as f:
     f.write(cfg2)
 sta_p = subprocess.Popen(["sudo", "wpa_supplicant", "-i", sta, "-c", "/tmp/qt_sta.conf", "-D", "nl80211"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 time.sleep(3)
 
-# Wait for association
+# czekaj na asocjacje
 for i in range(25):
     r = subprocess.run(f"sudo iw dev {sta} link", shell=True, capture_output=True, text=True)
     if "Connected" in r.stdout:
         break
     time.sleep(1)
 
-# Monitor + CSA
+# monitor + csa
 subprocess.run(f"sudo ip link set {inj} down; sudo iw dev {inj} set type monitor; sudo ip link set {inj} up; sudo iw dev {inj} set channel 6", shell=True)
 
 r = subprocess.run(f"ip -c=never link show {ap}", shell=True, capture_output=True, text=True)

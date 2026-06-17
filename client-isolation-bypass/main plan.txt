@@ -1,43 +1,43 @@
- PLAN REALIZACJI PROJEKTU: UŻYTKOWNIK KTÓRYM JESTEŚ TO KUBA PAMIETAJ
+ PLAN REALIZACJI PROJEKTU: UZYTKOWNIK KTORYM JESTES TO KUBA PAMIETAJ
 
  
 
-Etap 1: Fundamenty i środowisko (kwiecień)
+Etap 1: Fundamenty i srodowisko (kwiecien)
 
 Research i Dokumentacja:
 
-Przeczytanie publikacji i dokumentacji dotyczących wybranych ataków (szczególnie materiałów prof. Vanhoefa nt. izolacji oraz PMF)
+Przeczytanie publikacji i dokumentacji dotyczacych wybranych atakow (szczegolnie materialow prof. Vanhoefa nt. izolacji oraz PMF)
 
-Zrozumienie, jak działają flagi w nagłówkach ramek 802.11
+Zrozumienie, jak dzialaja flagi w naglowkach ramek 802.11
 
 Instalacja Laboratorium:
 
 Postawienie czystej maszyny wirtualnej z Linuxem
 
-Zainstalowanie mininet-wifi, scapy oraz narzędzi audytowych (wireshark)
+Zainstalowanie mininet-wifi, scapy oraz narzedzi audytowych (wireshark)
 
 Testy Bazowe (Proof of Concept):
 
-Napisanie skryptu w Pythonie (dla Mininet-wifi), który uruchomi prostą topologię: 1 AP (z włączonym Client Isolation i PMF) oraz 2-3 stacje klienckie
+Napisanie skryptu w Pythonie (dla Mininet-wifi), ktory uruchomi prosta topologie: 1 AP (z wlaczonym Client Isolation i PMF) oraz 2-3 stacje klienckie
 
-Udowodnienie, że w normalnych warunkach sieć poprawnie blokuje pakiety i chroni klientów
+Udowodnienie, ze w normalnych warunkach siec poprawnie blokuje pakiety i chroni klientow
 
 
 Etap 2: Ofensywa (maj)
 
 Atak 1: AirSnitch (Kamil)
 
-Opracowanie skryptu Scapy wstrzykującego spreparowane ramki, aby ominąć izolację L2 (Client Isolation) w Mininet-wifi
+Opracowanie skryptu Scapy wstrzykujacego spreparowane ramki, aby ominac izolacje L2 (Client Isolation) w Mininet-wifi
 
-Przechwycenie dowodów w Wiresharku (PCAP)
+Przechwycenie dowodow w Wiresharku (PCAP)
 
 Atak 2: PMF Bypass (Kuba)
 
-Wymuszenie rozłączenia lub manipulacji klientem mimo włączonego szyfrowania ramek zarządzających (802.11w)
+Wymuszenie rozlaczenia lub manipulacji klientem mimo wlaczonego szyfrowania ramek zarzadzajacych (802.11w)
 
 Atak 3: MAC Randomization & Association Attacks (Bartek)
 
-Napisanie narzędzia generującego setki fałszywych klientów do próby ominięcia izolacji sieci
+Napisanie narzedzia generujacego setki falszywych klientow do proby ominiecia izolacji sieci
 
  
 
@@ -45,27 +45,27 @@ Etap 3: Defensywa i raport (Maj/Czerwiec)
 
 Obrona i Mitygacja:
 
-Wdrożenie zabezpieczeń – np. zaostrzenie reguł w plikach konfiguracyjnych hostapd lub postawienie wirtualnego systemu WIDS (Wireless Intrusion Detection System) logującego anomalie
+Wdrozenie zabezpieczen – np. zaostrzenie regul w plikach konfiguracyjnych hostapd lub postawienie wirtualnego systemu WIDS (Wireless Intrusion Detection System) logujacego anomalie
 
 Pisanie Raportu:
 
 10-15 stron A4
 
-Rozdzielenie pracy według układu:
+Rozdzielenie pracy wedlug ukladu:
 
-Wprowadzenie, Opis techniczny i Cel (Wspólnie).
+Wprowadzenie, Opis techniczny i Cel (Wspolnie).
 
-Opis środowiska i metodologii (Osoba, która stawiała Mininet-wifi)
+Opis srodowiska i metodologii (Osoba, ktora stawiala Mininet-wifi)
 
-Zestawienie wyników, Analiza wyników i Wnioski (Każdy opisuje swój atak i wkleja logi/skrypty)
+Zestawienie wynikow, Analiza wynikow i Wnioski (Kazdy opisuje swoj atak i wkleja logi/skrypty)
 
  
 
-Etap 4: Finał (czerwiec)
+Etap 4: Final (czerwiec)
 
 Udoskonalenie Prezentacji:
 
-Przygotowanie dema na żywo (live) z ataków
+Przygotowanie dema na zywo (live) z atakow
 
 Zaliczenie (17.06):
 
@@ -79,13 +79,13 @@ Prezentacja projektu (ok. 15 minut)
 
  
 
-Źródła:
+Zrodla:
 
 - Na start o czym jest AirSnitch: https://sekurak.pl/airsnitch-nowy-atak-na-wifi-omijajacy-szyfrowanie
 
 - Repo do AirSnitch: https://github.com/vanhoefm/airsnitch
 
-- Jakaś publikacja nt. AirSnitch: https://www.ndss-symposium.org/ndss-paper/airsnitch-demystifying-and-breaking-client-isolation-in-wi-fi-networks/
+- Jakas publikacja nt. AirSnitch: https://www.ndss-symposium.org/ndss-paper/airsnitch-demystifying-and-breaking-client-isolation-in-wi-fi-networks/
 
 - PMF Bypass (802.11w): https://github.com/domienschepers/wifi-deauthentication
 
@@ -99,12 +99,12 @@ Prezentacja projektu (ok. 15 minut)
 
 - repo do MDK4 (do generowania ramek MAC w celu DoS): https://github.com/aircrack-ng/mdk4
 
-- Fake Authentication atak (narzędzie aireplay-ng), dokumentacja: https://www.aircrack-ng.org/doku.php?id=fake_authentication
+- Fake Authentication atak (narzedzie aireplay-ng), dokumentacja: https://www.aircrack-ng.org/doku.php?id=fake_authentication
 
-- repo do Kismet (narzędzie WIDS, służące do wykrywania i obrony): https://github.com/kismetwireless/kismet
+- repo do Kismet (narzedzie WIDS, sluzace do wykrywania i obrony): https://github.com/kismetwireless/kismet
 
-- narzędzie Zeek: https://zeek.org
+- narzedzie Zeek: https://zeek.org
 
-- Obrona (dokumentacja hostapd, sprawdzić parametry takie jak: max_num_sta, macaddr_acl, ieee80211w): https://w1.fi/cgit/hostap/plain/hostapd/hostapd.conf
+- Obrona (dokumentacja hostapd, sprawdzic parametry takie jak: max_num_sta, macaddr_acl, ieee80211w): https://w1.fi/cgit/hostap/plain/hostapd/hostapd.conf
 
 - publikacja nt. obrony w sieciach korporacyjnych: https://www.cisco.com/c/en/us/support/docs/wireless/4400-series-wireless-lan-controllers/112045-handling-rogue-cuwn-00.html
